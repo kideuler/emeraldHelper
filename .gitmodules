@@ -1,0 +1,3 @@
+[submodule "agbcc"]
+	path = agbcc
+	url = git@github.com:kideuler/agbcc.git
