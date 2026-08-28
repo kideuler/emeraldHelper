@@ -1,0 +1,6 @@
+add_executable(jsonproc jsonproc.cpp)
+target_include_directories(jsonproc PRIVATE .)
+target_compile_features(jsonproc PRIVATE cxx_std_17)
+if(NOT MSVC)
+  target_compile_options(jsonproc PRIVATE -Wall)
+endif()

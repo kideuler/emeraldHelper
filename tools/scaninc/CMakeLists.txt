@@ -1,0 +1,5 @@
+add_executable(scaninc scaninc.cpp c_file.cpp asm_file.cpp source_file.cpp)
+target_compile_features(scaninc PRIVATE cxx_std_11)
+if(NOT MSVC)
+  target_compile_options(scaninc PRIVATE -Wall -Werror)
+endif()

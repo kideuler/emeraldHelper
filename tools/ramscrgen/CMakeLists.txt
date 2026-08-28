@@ -1,0 +1,5 @@
+add_executable(ramscrgen main.cpp sym_file.cpp elf.cpp)
+target_compile_features(ramscrgen PRIVATE cxx_std_11)
+if(NOT MSVC)
+  target_compile_options(ramscrgen PRIVATE -Wall -Wno-switch -Werror)
+endif()

@@ -1,0 +1,5 @@
+add_executable(wav2agb converter.cpp wav2agb.cpp wav_file.cpp)
+target_compile_features(wav2agb PRIVATE cxx_std_17)
+if(NOT MSVC)
+  target_compile_options(wav2agb PRIVATE -Wall -Werror)
+endif()

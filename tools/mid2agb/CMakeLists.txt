@@ -1,0 +1,5 @@
+add_executable(mid2agb agb.cpp error.cpp main.cpp midi.cpp tables.cpp)
+target_compile_features(mid2agb PRIVATE cxx_std_11)
+if(NOT MSVC)
+  target_compile_options(mid2agb PRIVATE -Wall -Wno-switch -Werror)
+endif()

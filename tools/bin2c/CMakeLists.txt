@@ -1,0 +1,7 @@
+add_executable(bin2c bin2c.c)
+target_compile_features(bin2c PRIVATE c_std_11)
+if(MSVC)
+  target_compile_options(bin2c PRIVATE /W4)
+else()
+  target_compile_options(bin2c PRIVATE -Wall -Wextra -Werror)
+endif()

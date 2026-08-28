@@ -1,0 +1,5 @@
+add_executable(mapjson json11.cpp mapjson.cpp)
+target_compile_features(mapjson PRIVATE cxx_std_11)
+if(NOT MSVC)
+  target_compile_options(mapjson PRIVATE -Wall)
+endif()
