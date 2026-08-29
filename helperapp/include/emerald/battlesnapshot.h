@@ -30,6 +30,7 @@ struct BattleMon {
     quint8 ability = 0;
     quint8 level = 0;
     quint32 status1 = 0;
+    quint16 item = 0;
 };
 
 // A benched party member. Phase 2.2: party data is encrypted, so `valid`

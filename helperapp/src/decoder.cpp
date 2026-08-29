@@ -38,6 +38,7 @@ BattleMon decodeBattleMon(const QByteArray &raw, const StructLayout &layout)
     mon.ability = rd8(raw, layout.offset("ability"));
     mon.level = rd8(raw, layout.offset("level"));
     mon.status1 = rd32(raw, layout.offset("status1"));
+    mon.item = rd16(raw, layout.offset("item"));
 
     readArray(raw, layout, "moves", mon.moves);
     readArray(raw, layout, "pp", mon.pp);

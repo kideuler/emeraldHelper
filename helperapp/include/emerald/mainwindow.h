@@ -1,6 +1,7 @@
 #pragma once
 
 #include "emerald/battlesnapshot.h"
+#include "emerald/nametable.h"
 #include "emerald/rawsnapshot.h"
 #include "emerald/structlayout.h"
 #include "emerald/symboltable.h"
@@ -11,16 +12,18 @@
 #include <QMainWindow>
 #include <QTableWidget>
 
-// Phase 4 / 7 v1: deliberately minimal ("ugly table, live, correct" --
-// Milestone 7). A correctness-first placeholder, not the polished layout
-// described in Phase 7 (which is out of scope here).
+// Battler-column layout: 2 columns (4 in a double battle), one per
+// battler, rows = name / HP / four moves (each with a computed damage
+// range) / the rest of the stats. Column/row data comes from
+// BuildBattlerGrid() (battlerview.h) -- this class only renders it.
 namespace emerald {
 
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
 public:
-    MainWindow(const SymbolTable &symbols, const StructLayout &monLayout, QWidget *parent = nullptr);
+    MainWindow(const SymbolTable &symbols, const StructLayout &monLayout, const NameTable &names,
+               QWidget *parent = nullptr);
 
 public slots:
     void onRawSnapshot(const emerald::RawSnapshot &raw);
@@ -32,6 +35,7 @@ private:
 
     SymbolTable m_symbols;
     StructLayout m_monLayout;
+    NameTable m_names;
 
     QLabel *m_statusLabel;
     QTableWidget *m_table;

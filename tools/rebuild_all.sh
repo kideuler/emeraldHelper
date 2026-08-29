@@ -73,6 +73,12 @@ python3 tools/gen_symbols.py "$map_file" > helperapp/config/symbols_us_rev0.json
 echo "==> Regenerating helperapp/config/battle_pokemon_layout_us_rev0.json"
 python3 tools/gen_struct_layout.py > helperapp/config/battle_pokemon_layout_us_rev0.json
 
+echo "==> Regenerating helperapp/config/item_hold_effects_us_rev0.json (Phase 5)"
+python3 tools/gen_item_hold_effects.py > helperapp/config/item_hold_effects_us_rev0.json
+
+echo "==> Regenerating helperapp/config/display_names_us_rev0.json (species/move/ability/type names)"
+python3 tools/gen_display_names.py > helperapp/config/display_names_us_rev0.json
+
 echo "==> Checking helperapp/lua/emerald_bridge.lua against the fresh symbol table"
 python3 tools/check_lua_addresses.py || true # warn only, never block the rebuild
 

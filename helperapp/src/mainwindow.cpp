@@ -1,5 +1,6 @@
 #include "emerald/mainwindow.h"
 
+#include "emerald/battlerview.h"
 #include "emerald/decoder.h"
 
 #include <QHeaderView>
@@ -23,12 +24,90 @@ QByteArray hashRawSnapshot(const RawSnapshot &raw)
     return hash.result();
 }
 
+enum Row {
+    RowName = 0,
+    RowHp,
+    RowMove1,
+    RowMove2,
+    RowMove3,
+    RowMove4,
+    RowLevel,
+    RowTypes,
+    RowAbility,
+    RowStatus,
+    RowAttack,
+    RowDefense,
+    RowSpAttack,
+    RowSpDefense,
+    RowSpeed,
+    RowCount,
+};
+
+const char *const kRowLabels[RowCount] = {
+    "Name", "HP", "Move 1", "Move 2", "Move 3", "Move 4", "Level", "Type",
+    "Ability", "Status", "Attack", "Defense", "Sp. Atk", "Sp. Def", "Speed",
+};
+
+QString FormatMoveCell(const MoveDisplay &m)
+{
+    if (!m.present)
+        return QString();
+    if (!m.hasDamageRange)
+        return m.name; // status move, or opponent unknown -- name only
+    if (m.isImmune)
+        return QStringLiteral("%1 (immune)").arg(m.name);
+    return QStringLiteral("%1: %2-%3 (%4%-%5%)")
+        .arg(m.name)
+        .arg(m.minDamage)
+        .arg(m.maxDamage)
+        .arg(m.minPercent, 0, 'f', 1)
+        .arg(m.maxPercent, 0, 'f', 1);
+}
+
+void FillColumn(QTableWidget *table, int col, const BattlerColumn &c)
+{
+    auto set = [&](int row, const QString &text) {
+        table->setItem(row, col, new QTableWidgetItem(text));
+    };
+
+    if (!c.present) {
+        for (int row = 0; row < RowCount; ++row)
+            set(row, row == RowName ? QStringLiteral("--") : QString());
+        return;
+    }
+
+    set(RowName, c.name);
+    set(RowHp, QStringLiteral("%1 / %2").arg(c.hp).arg(c.maxHp));
+    set(RowMove1, FormatMoveCell(c.moves[0]));
+    set(RowMove2, FormatMoveCell(c.moves[1]));
+    set(RowMove3, FormatMoveCell(c.moves[2]));
+    set(RowMove4, FormatMoveCell(c.moves[3]));
+    set(RowLevel, QString::number(c.level));
+    set(RowTypes, c.typeText);
+    set(RowAbility, c.abilityText);
+    set(RowStatus, c.statusText);
+    set(RowAttack, QString::number(c.attack));
+    set(RowDefense, QString::number(c.defense));
+    set(RowSpAttack, QString::number(c.spAttack));
+    set(RowSpDefense, QString::number(c.spDefense));
+    set(RowSpeed, QString::number(c.speed));
+}
+
+QStringList ColumnHeaders(bool isDoubleBattle)
+{
+    if (isDoubleBattle)
+        return {QStringLiteral("Ally L"), QStringLiteral("Ally R"), QStringLiteral("Foe L"), QStringLiteral("Foe R")};
+    return {QStringLiteral("Ally"), QStringLiteral("Foe")};
+}
+
 } // namespace
 
-MainWindow::MainWindow(const SymbolTable &symbols, const StructLayout &monLayout, QWidget *parent)
+MainWindow::MainWindow(const SymbolTable &symbols, const StructLayout &monLayout, const NameTable &names,
+                        QWidget *parent)
     : QMainWindow(parent)
     , m_symbols(symbols)
     , m_monLayout(monLayout)
+    , m_names(names)
 {
     auto *central = new QWidget(this);
     auto *layout = new QVBoxLayout(central);
@@ -36,16 +115,18 @@ MainWindow::MainWindow(const SymbolTable &symbols, const StructLayout &monLayout
     m_statusLabel = new QLabel(tr("Waiting for mGBA bridge connection..."), central);
     layout->addWidget(m_statusLabel);
 
-    m_table = new QTableWidget(kMaxBattlers, 8, central);
-    m_table->setHorizontalHeaderLabels({tr("Battler"), tr("Species"), tr("Lvl"), tr("HP"),
-                                         tr("Max HP"), tr("Status"), tr("Ability"), tr("Types")});
-    m_table->horizontalHeader()->setStretchLastSection(true);
-    m_table->verticalHeader()->setVisible(false);
+    m_table = new QTableWidget(RowCount, 2, central);
+    QStringList rowLabels;
+    for (const char *label : kRowLabels)
+        rowLabels << QString::fromLatin1(label);
+    m_table->setVerticalHeaderLabels(rowLabels);
+    m_table->setHorizontalHeaderLabels(ColumnHeaders(false));
+    m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     layout->addWidget(m_table);
 
     setCentralWidget(central);
     setWindowTitle(tr("Emerald Battle Companion"));
-    resize(640, 320);
+    resize(900, 520);
 
     setStale(true);
 }
@@ -80,19 +161,17 @@ void MainWindow::applySnapshot(const BattleSnapshot &snap)
 {
     m_statusLabel->setText(snap.inBattle() ? tr("In battle") : tr("Connected, not in battle"));
 
-    for (int i = 0; i < kMaxBattlers; ++i) {
-        const BattleMon &mon = snap.mons[i];
-        const bool absent = ((snap.absentBattlerFlags >> i) & 0x1) != 0;
+    const BattlerGrid grid = BuildBattlerGrid(snap, m_names);
 
-        m_table->setItem(i, 0, new QTableWidgetItem(tr("Battler %1").arg(i)));
-        m_table->setItem(i, 1, new QTableWidgetItem(absent ? tr("--") : QString::number(mon.species)));
-        m_table->setItem(i, 2, new QTableWidgetItem(QString::number(mon.level)));
-        m_table->setItem(i, 3, new QTableWidgetItem(QString::number(mon.hp)));
-        m_table->setItem(i, 4, new QTableWidgetItem(QString::number(mon.maxHp)));
-        m_table->setItem(i, 5, new QTableWidgetItem(QString::number(mon.status1)));
-        m_table->setItem(i, 6, new QTableWidgetItem(QString::number(mon.ability)));
-        m_table->setItem(i, 7, new QTableWidgetItem(QStringLiteral("%1/%2").arg(mon.type1).arg(mon.type2)));
+    if (m_table->columnCount() != grid.columns.size()) {
+        m_table->setColumnCount(grid.columns.size());
+        m_table->setHorizontalHeaderLabels(ColumnHeaders(grid.isDoubleBattle));
     }
+
+    for (int col = 0; col < grid.columns.size(); ++col)
+        FillColumn(m_table, col, grid.columns.at(col));
+
+    m_table->setEnabled(true);
 }
 
 void MainWindow::setStale(bool stale)
