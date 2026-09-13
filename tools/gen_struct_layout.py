@@ -27,17 +27,26 @@ import re
 import sys
 
 POKEMON_H = "include/pokemon.h"
+BATTLE_H = "include/battle.h"
+BERRY_H = "include/global.berry.h"
+GLOBAL_H = "include/global.h"
 
 # Constants referenced by array-length expressions in the struct
-# definitions (include/constants/global.h, include/constants/pokemon.h).
+# definitions (include/constants/global.h, include/constants/pokemon.h,
+# include/constants/battle.h, include/global.berry.h).
 CONSTS = {
     "MAX_MON_MOVES": 4,
     "NUM_BATTLE_STATS": 8,
     "POKEMON_NAME_LENGTH": 10,
     "PLAYER_NAME_LENGTH": 7,
+    "MAX_BATTLERS_COUNT": 4,
+    "NUM_BATTLE_SIDES": 2,
+    "BERRY_NAME_LENGTH": 6,
+    "BERRY_ITEM_EFFECT_COUNT": 18,
 }
 
-BASE_SIZE = {"u8": 1, "s8": 1, "u16": 2, "s16": 2, "u32": 4, "s32": 4}
+BASE_SIZE = {"u8": 1, "s8": 1, "u16": 2, "s16": 2, "u32": 4, "s32": 4,
+             "bool8": 1, "bool32": 4}
 
 ANNOTATED_FIELD_RE = re.compile(
     r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/\s+"
@@ -62,7 +71,7 @@ def resolve_array_len(expr):
 def extract_struct_body(header_text, struct_name):
     m = re.search(rf"struct {struct_name}\s*\{{", header_text)
     if not m:
-        raise ValueError(f"struct {struct_name} not found in {POKEMON_H}")
+        raise ValueError(f"struct {struct_name} not found")
     start = m.end()
     depth = 1
     i = start
@@ -89,6 +98,50 @@ def extract_annotated(header_text, struct_name):
         if bits is not None:
             entry["bits"] = bits
         fields[name] = entry
+    return fields
+
+
+# One member declaration of a plain struct body, after comments are
+# stripped: "u8 name", "u32 name:1", "u16 name[MAX_BATTLERS_COUNT]",
+# "struct Foo *name", "const u8 *name".
+PLAIN_FIELD_RE = re.compile(
+    r"^(?:const\s+)?(?:(u8|s8|u16|s16|u32|s32|bool8|bool32)|struct\s+\w+|\w+)\s*"
+    r"(\*)?\s*(\w+)\s*(?:\[([^\]]+)\])?\s*(?::\s*(\d+))?$"
+)
+
+
+def parse_struct_fields(header_text, struct_name):
+    """
+    Ordered field list (layout_sequential()'s input shape) parsed straight
+    from a struct's declaration, for structs the decomp doesn't annotate
+    with /*0xNN*/ offsets (DisableStruct, ProtectStruct, SideTimer, ...).
+    Only handles what those structs actually contain -- integer members,
+    arrays, bitfields, pointers -- and fails loudly on anything else
+    (nested struct values, unions) rather than guessing at a layout.
+    """
+    body = extract_struct_body(header_text, struct_name)
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.DOTALL)
+    body = re.sub(r"//[^\n]*", "", body)
+    body = body.rstrip().rstrip("}")
+    fields = []
+    for decl in body.split(";"):
+        decl = " ".join(decl.split())
+        if not decl:
+            continue
+        m = PLAIN_FIELD_RE.match(decl)
+        if not m:
+            raise ValueError(f"struct {struct_name}: can't parse member {decl!r}")
+        base_type, is_ptr, name, array_expr, bits = m.groups()
+        if is_ptr:
+            base = 4
+        elif base_type:
+            base = BASE_SIZE[base_type]
+        else:
+            raise ValueError(f"struct {struct_name}: non-integer member {decl!r}")
+        field = {"name": name, "base": base, "count": resolve_array_len(array_expr)}
+        if bits is not None:
+            field["bits"] = int(bits)
+        fields.append(field)
     return fields
 
 
@@ -238,34 +291,76 @@ BATTLE_POKEMON_FIELDS_FOR_VALIDATION = [
 ]
 
 
-def self_validate(annotated_battlemon):
-    computed, total = layout_sequential(BATTLE_POKEMON_FIELDS_FOR_VALIDATION)
+def self_validate(annotated_battlemon, field_list, what):
+    computed, total = layout_sequential(field_list)
     if total != 0x58:
-        raise AssertionError(f"layout_sequential self-check: size {total:#x} != 0x58")
+        raise AssertionError(f"{what} self-check: size {total:#x} != 0x58")
     for name, expected in annotated_battlemon.items():
         got = computed.get(name)
         if got is None:
-            raise AssertionError(f"layout_sequential self-check: missing field {name!r}")
+            raise AssertionError(f"{what} self-check: missing field {name!r}")
         # Compare the fields the annotated extractor also produces.
         for key in ("offset", "size", "count"):
             if got.get(key) != expected.get(key):
                 raise AssertionError(
-                    f"layout_sequential self-check: field {name!r} {key} "
+                    f"{what} self-check: field {name!r} {key} "
                     f"computed={got.get(key)!r} annotated={expected.get(key)!r}"
                 )
     print(
-        "self-check OK: layout_sequential() reproduces BattlePokemon's "
-        "annotated offsets exactly",
+        f"self-check OK: {what} reproduces BattlePokemon's annotated offsets exactly",
         file=sys.stderr,
     )
+    return computed
+
+
+def extract_saveblock1_flags(global_text):
+    """
+    SaveBlock1 is annotated, but it's mostly nested struct members the
+    annotated-field regex can't size, so only `flags` (all badge flags live
+    there -- FlagGet() reads gSaveBlock1Ptr->flags[id / 8]) is taken. Its
+    element count is the gap to the next annotated member rather than
+    NUM_FLAG_BYTES re-derived from constants/flags.h's #define chain.
+    """
+    body = extract_struct_body(global_text, "SaveBlock1")
+    offsets = [(int(m.group(1), 16), m.group(2))
+               for m in re.finditer(r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/[^;]*?(\w+)\s*(?:\[[^\]]*\])?\s*;", body)]
+    for i, (offset, name) in enumerate(offsets):
+        if name == "flags":
+            return {"flags": {"offset": offset, "size": 1, "count": offsets[i + 1][0] - offset}}
+    raise ValueError("SaveBlock1.flags not found")
 
 
 def main():
     with open(POKEMON_H) as f:
         header_text = f.read()
+    with open(BATTLE_H) as f:
+        battle_text = f.read()
+    with open(BERRY_H) as f:
+        berry_text = f.read()
+    with open(GLOBAL_H) as f:
+        global_text = f.read()
 
     battlemon_fields = extract_annotated(header_text, "BattlePokemon")
-    self_validate(battlemon_fields)
+    self_validate(battlemon_fields, BATTLE_POKEMON_FIELDS_FOR_VALIDATION, "layout_sequential()")
+    # Same check again, but from the raw declaration via parse_struct_fields()
+    # -- so the parser that lays out battle.h's unannotated structs below is
+    # held to the same ground truth as the aligner.
+    computed_battlemon = self_validate(
+        battlemon_fields, parse_struct_fields(header_text, "BattlePokemon"),
+        "parse_struct_fields() + layout_sequential()")
+    # The annotations name only the byte holding a bitfield's low bit; carry
+    # over the validated computed bit position so a decoder can extract
+    # hpIV..spDefenseIV etc. by name (Hidden Power reads them).
+    for name, entry in battlemon_fields.items():
+        if "bits" in entry:
+            entry["bitOffset"] = computed_battlemon[name]["bitOffset"]
+
+    battle_structs = {}
+    for struct_name in ("DisableStruct", "ProtectStruct", "SideTimer", "BattleResources", "ResourceFlags"):
+        fields, size = layout_sequential(parse_struct_fields(battle_text, struct_name))
+        battle_structs[struct_name] = {"size": size, "source": "computed", "fields": fields}
+    enigma_fields = extract_annotated(berry_text, "BattleEnigmaBerry")
+    enigma_size = align(max(f["offset"] + f["size"] * f["count"] for f in enigma_fields.values()), 4)
 
     box_fields, box_size = layout_sequential(BOX_POKEMON_FIELDS)
     pokemon_fields, pokemon_size = layout_sequential(BOX_POKEMON_FIELDS + POKEMON_TAIL_FIELDS)
@@ -282,11 +377,14 @@ def main():
 
     out = {
         "_comment": (
-            "Generated by tools/gen_struct_layout.py from include/pokemon.h. "
-            "BattlePokemon and PokemonSubstruct3 are extracted from the "
-            "decomp's own /*0xNN*/ offset comments; the rest are computed "
-            "with an aligner that is self-validated against BattlePokemon's "
-            "annotated layout before being trusted (see script header)."
+            "Generated by tools/gen_struct_layout.py from include/pokemon.h, "
+            "include/battle.h, include/global.berry.h and include/global.h. "
+            "Structs with source=annotated are extracted from the decomp's "
+            "own /*0xNN*/ offset comments; source=computed ones are laid out "
+            "by an aligner + declaration parser that are self-validated "
+            "against BattlePokemon's annotated layout before being trusted "
+            "(see script header). tools/verify_struct_layout.py cross-checks "
+            "every struct here against agbcc itself."
         ),
         "structs": {
             "BattlePokemon": {"size": 0x58, "source": "annotated", "fields": battlemon_fields},
@@ -296,6 +394,11 @@ def main():
             "PokemonSubstruct1": {"size": sub1_size, "source": "computed", "fields": sub1_fields},
             "PokemonSubstruct2": {"size": sub2_size, "source": "computed", "fields": sub2_fields},
             "PokemonSubstruct3": {"size": sub3_size, "source": "annotated", "fields": sub3_fields},
+            **battle_structs,
+            "BattleEnigmaBerry": {"size": enigma_size, "source": "annotated", "fields": enigma_fields},
+            # Only `flags` -- see extract_saveblock1_flags(). No "size": the
+            # decoder only ever reads this one member of it.
+            "SaveBlock1": {"source": "annotated", "fields": extract_saveblock1_flags(global_text)},
         },
     }
 

@@ -24,23 +24,49 @@ faithfully porting it is out of scope for now.
 - `include/emerald/`, `src/` -- the app itself. The main window is a
   battler-column grid: 2 columns (4 in a double battle), one per battler,
   rows for name / HP / each of the four moves (live damage range, number
-  and % of the opposing battler's max HP) / level / type / ability /
-  status / stats. `battlerview.h`/`.cpp` build that grid as a pure
+  and % of the opposing battler's max HP, one-use KO chance, plus the
+  move's computed power/type/hit count when its script changes them, or
+  why it does nothing) / level / type / ability / status / stat stages /
+  stats, under a line showing weather and each side's screens. `battlerview.h`/`.cpp` build that grid as a pure
   function of a `BattleSnapshot` (`BuildBattlerGrid()`); `mainwindow.cpp`
   only renders it into a `QTableWidget`.
-- `calc/` -- Phase 5 damage calculation, a plain C library (`emerald_calc`)
-  ported from the decomp's own `CalculateBaseDamage()`/`TypeCalc()`
-  (src/pokemon.c, src/battle_script_commands.c), not reimplemented from a
-  formula writeup. See `calc/include/emerald_calc.h`'s header comment for
-  what it does and doesn't model (no live per-turn field state -- weather,
-  screens, crit, etc. are caller-supplied `EmeraldCalcFieldConditions`
-  rather than read off a battle turn in progress).
+- `calc/` -- Phase 5 move calculation, a plain C library (`emerald_calc`)
+  ported from the decomp, not reimplemented from a formula writeup:
+  - `calc/include/battle_state.h` -- `struct BattleState`, a one-for-one
+    mirror of the game's battle globals (`gBattleMons`, `gBattleWeather`,
+    `gSideStatuses`, `gSideTimers`, `gStatuses3`, `gDisableStructs`,
+    `gProtectStructs`, `gEnigmaBerries`, Flash Fire flags, badge flags,
+    both parties, ...), with the decomp's own struct and field names.
+  - `calc/src/damage.c` -- `CalculateBaseDamage()` and the `damagecalc` /
+    `typecalc` / `critcalc` / `accuracycheck` script commands.
+  - `calc/src/move_scripts.c` -- each move effect's battle script from
+    `data/battle_scripts_1.s`, run up to where damage is dealt, with the
+    effect-specific commands (Low Kick's `weightdamagecalculation`,
+    Flail, Hidden Power, Weather Ball, Rollout, Magnitude, Present, Beat
+    Up, multi-hit, fixed-damage and OHKO moves, ...). Every `Random()` is
+    enumerated rather than rolled.
+  - `calc/src/ko.c` -- exact KO odds from those outcomes (accuracy, crits,
+    rolls, hit counts, Focus Band, Endure).
+  - `calc/src/game_data.c` -- `src/data/battle_moves.h`, `species_info.h`
+    and the Pokedex tables, compiled in unmodified.
+
+  `EmeraldCalc_SimulateMove(state, attacker, target, move)` is the entry
+  point; see `calc/include/emerald_calc.h`.
 - `lua/emerald_bridge.lua` -- loaded into mGBA (Tools -> Scripting), sends
-  battle memory to the app over TCP.
-- `tests/` -- offline unit tests (no emulator, no GUI event loop). The
-  damage-calc tests are hand-computed against the real Gen 3 formula (see
-  `tests/test_damage.cpp`'s header comment) -- not yet cross-checked
-  against a live mGBA savestate (CODE_PLAN.md Phase 5.5).
+  every region `BattleState` needs to the app over TCP, following the
+  `gBattleResources` and `gSaveBlock1Ptr` pointers itself. The decoder
+  lists any region it didn't receive in the window's status line.
+- `tests/` -- offline unit tests (no emulator, no GUI event loop):
+  - `test_damage.cpp` -- hand-computed cases from the decomp's code,
+    derivations in the comments.
+  - `test_decomp_diff.cpp` -- a differential test: `CalculateBaseDamage()`
+    and the script commands are extracted *verbatim* from `src/` at build
+    time (`extract_decomp.py`, `decomp_reference.c`) and the port is
+    required to match them exactly over hundreds of thousands of random
+    battle states (crit/accuracy over all 65536 `Random()` values).
+
+  Neither is yet cross-checked against a live mGBA savestate
+  (CODE_PLAN.md Phase 5.5).
 
 ## Build
 
@@ -50,7 +76,8 @@ cmake --build helperapp/build
 ctest --test-dir helperapp/build --output-on-failure
 ```
 
-Requires Qt6 (`Widgets`, `Network`) and, optionally, GoogleTest to build
+Requires Qt6 (`Widgets`, `Network`) and, optionally, GoogleTest (plus Python 3,
+for the differential test's source extraction) to build
 `tests/` (skipped automatically if not found).
 
 ## Running it
@@ -70,14 +97,19 @@ After rebuilding pokeemerald (or targeting a different revision):
 python3 ../tools/gen_symbols.py <path/to/pokeemerald.map> \
     > config/symbols_us_rev0.json
 python3 ../tools/gen_struct_layout.py > config/battle_pokemon_layout_us_rev0.json
+python3 ../tools/verify_struct_layout.py   # from the repo root: checks every offset against agbcc
 python3 ../tools/gen_item_hold_effects.py > config/item_hold_effects_us_rev0.json
 python3 ../tools/gen_display_names.py > config/display_names_us_rev0.json
 ```
 
 Or just run `../tools/rebuild_all.sh` from the repo root, which does all of
-the above (plus the ROM build itself) in one shot.
+the above (plus the ROM build itself) in one shot. Add `--clean` to wipe
+both build trees first for a from-scratch rebuild.
 
-Then copy the new `REGIONS` addresses from `symbols_us_rev0.json` into
-`lua/emerald_bridge.lua` (see the comment at the top of that file) --
-mGBA's Lua sandbox has no JSON parser, so those addresses are duplicated
-there by hand and must be kept in sync manually.
+Then copy the new `REGIONS` addresses (and the `gBattleResources` /
+`gSaveBlock1Ptr` pointer addresses below them) from `symbols_us_rev0.json`
+into `lua/emerald_bridge.lua` (see the comment at the top of that file) --
+mGBA's Lua sandbox has no JSON parser, so those addresses, plus a few
+struct sizes, are duplicated there by hand. `../tools/check_lua_addresses.py`
+(run by `rebuild_all.sh`) flags any address, length or struct constant that
+no longer matches the config.

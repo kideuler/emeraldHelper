@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QMap>
 #include <QString>
 
@@ -25,13 +26,25 @@ public:
     int offset(const QString &field) const { return m_fields.value(field).offset; }
     int elemSize(const QString &field) const { return m_fields.value(field).size; }
     int count(const QString &field) const { return m_fields.value(field).count; }
+    // Bitfields: `bits` wide, starting `bitOffset` bits into the elemSize()-
+    // byte storage unit. For a plain field bits() is 0.
+    int bits(const QString &field) const { return m_fields.value(field).bits; }
+    int bitOffset(const QString &field) const { return m_fields.value(field).bitOffset; }
     int totalSize() const { return m_totalSize; }
+
+    // Reads `field` (element `index` of it, for arrays) out of a struct
+    // instance starting at `base` in `raw`: little-endian, bitfields
+    // shifted and masked. Returns 0 for an unknown field or out-of-range
+    // read, so a short or stale region degrades to zeroes, never a crash.
+    quint32 read(const QByteArray &raw, int base, const QString &field, int index = 0) const;
 
 private:
     struct FieldInfo {
         int offset = 0;
         int size = 0;
         int count = 1;
+        int bits = 0;
+        int bitOffset = 0;
     };
 
     QMap<QString, FieldInfo> m_fields;

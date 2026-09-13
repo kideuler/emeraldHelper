@@ -1,13 +1,17 @@
-#include "emerald_calc.h"
+/* Ports of the damage pipeline: CalculateBaseDamage() (src/pokemon.c) and
+ * the critcalc / damagecalc / typecalc / typecalc2 / accuracycheck /
+ * adjustnormaldamage script commands (src/battle_script_commands.c).
+ *
+ * These follow the originals statement for statement -- truncation order,
+ * quirks and all -- with globals read from struct BattleState /
+ * struct MoveContext instead (see battle_internal.h). Where a command
+ * rolls Random(), the port returns the probability of each outcome
+ * instead of picking one. */
+#include "battle_internal.h"
 
-#include <string.h>
+/* --- Tables, verbatim ----------------------------------------------------- */
 
-/* --- Type effectiveness table --------------------------------------------
- * Ported verbatim from src/battle_main.c's gTypeEffectiveness[336], walked
- * the same way TypeCalc()/AI_TypeCalc() do via the TYPE_EFFECT_ATK_TYPE/
- * DEF_TYPE/MULTIPLIER macros (include/battle_main.h) -- redeclared here,
- * not included, for the same "cascades into GBA headers" reason as
- * emerald_calc.h's other constants. */
+/* include/battle_main.h */
 #define TYPE_MUL_NO_EFFECT       0
 #define TYPE_MUL_NOT_EFFECTIVE   5
 #define TYPE_MUL_NORMAL          10
@@ -15,6 +19,8 @@
 #define TYPE_FORESIGHT 0xFE
 #define TYPE_ENDTABLE  0xFF
 
+/* src/battle_main.c gTypeEffectiveness[336], walked the same way via the
+ * TYPE_EFFECT_* macros (include/battle_main.h). */
 static const u8 sTypeEffectiveness[336] = {
     TYPE_NORMAL, TYPE_ROCK, TYPE_MUL_NOT_EFFECTIVE,
     TYPE_NORMAL, TYPE_STEEL, TYPE_MUL_NOT_EFFECTIVE,
@@ -134,23 +140,34 @@ static const u8 sTypeEffectiveness[336] = {
 #define TYPE_EFFECT_DEF_TYPE(i)   (sTypeEffectiveness[(i) + 1])
 #define TYPE_EFFECT_MULTIPLIER(i) (sTypeEffectiveness[(i) + 2])
 
-/* Ported verbatim from src/battle_script_commands.c's sCriticalHitChance
- * (index = critChance from Cmd_critcalc). */
+/* src/battle_script_commands.c sCriticalHitChance -- the chance is 1/N. */
 static const u16 sCriticalHitChance[] = {16, 8, 4, 3, 2};
 #define CRIT_CHANCE_TABLE_SIZE (sizeof(sCriticalHitChance) / sizeof(sCriticalHitChance[0]))
 
-/* Ported verbatim from src/pokemon.c's gStatStageRatios. */
-static const u8 sStatStageRatios[MAX_STAT_STAGE + 1][2] = {
+/* src/battle_script_commands.c sAccuracyStageRatios. */
+static const struct { u8 dividend; u8 divisor; } sAccuracyStageRatios[] = {
+    { 33, 100}, // -6
+    { 36, 100}, // -5
+    { 43, 100}, // -4
+    { 50, 100}, // -3
+    { 60, 100}, // -2
+    { 75, 100}, // -1
+    {  1,   1}, //  0
+    {133, 100}, // +1
+    {166, 100}, // +2
+    {  2,   1}, // +3
+    {233, 100}, // +4
+    {133,  50}, // +5
+    {  3,   1}, // +6
+};
+
+/* src/pokemon.c gStatStageRatios. */
+static const u8 gStatStageRatios[MAX_STAT_STAGE + 1][2] = {
     {10, 40}, {10, 35}, {10, 30}, {10, 25}, {10, 20}, {10, 15}, {10, 10},
     {15, 10}, {20, 10}, {25, 10}, {30, 10}, {35, 10}, {40, 10},
 };
-#define APPLY_STAT_MOD(var, mon, stat, statIndex)                        \
-    do {                                                                 \
-        (var) = (s32)(stat) * sStatStageRatios[(mon)->statStages[(statIndex)]][0]; \
-        (var) /= sStatStageRatios[(mon)->statStages[(statIndex)]][1];    \
-    } while (0)
 
-/* Ported verbatim from src/pokemon.c's sHoldEffectToType. */
+/* src/pokemon.c sHoldEffectToType. */
 static const u8 sHoldEffectToType[][2] = {
     {HOLD_EFFECT_BUG_POWER, TYPE_BUG},
     {HOLD_EFFECT_STEEL_POWER, TYPE_STEEL},
@@ -172,64 +189,102 @@ static const u8 sHoldEffectToType[][2] = {
 };
 #define HOLD_EFFECT_TO_TYPE_COUNT (sizeof(sHoldEffectToType) / sizeof(sHoldEffectToType[0]))
 
+/* include/battle.h */
+#define DYNAMIC_TYPE_MASK ((1 << 6) - 1)
 #define IS_TYPE_PHYSICAL(moveType) ((moveType) < TYPE_MYSTERY)
 #define IS_TYPE_SPECIAL(moveType)  ((moveType) > TYPE_MYSTERY)
 
-/*
- * Ported from CalculateBaseDamage() (src/pokemon.c:3106-3372). Deviations
- * from the original, all driven by not having a live 4-battler turn in
- * progress (see emerald_calc.h's EmeraldCalcFieldConditions comment):
- *   - powerOverride/typeOverride dropped (no Hidden Power/Weather Ball
- *     dynamic typing; always gBattleMoves[move].{power,type})
- *   - Enigma Berry special-cased item lookup dropped (GetItemHoldEffect()
- *     is used unconditionally)
- *   - ShouldGetStatBadgeBoost() -> field->applyBadgeBoosts (see its doc
- *     comment for the fidelity tradeoff)
- *   - AbilityBattleEffects() mud/water sport field check dropped (no field
- *     state); always "no sport in effect"
- *   - BATTLE_TYPE_FRONTIER Soul Dew check dropped (assumes non-Frontier)
- *   - gCurrentMove (for the Explosion/Self-Destruct defense halving) ->
- *     the `move` parameter
- *   - CountAliveMonsInBattle(BATTLE_ALIVE_DEF_SIDE) == 2 ->
- *     field->targetSideHasTwoAliveMons
- *   - gBattleResources flash-fire flag dropped; always "not triggered"
- * Everything else -- stat stage math, item/ability boosts, weather,
- * screens, badge/burn/self-destruct handling, the final "+2" -- is the
- * original arithmetic, truncation order included.
- */
-static s32 CalculateBaseDamage(const EmeraldCalcMon *attacker, const EmeraldCalcMon *defender, u16 move,
-                                const EmeraldCalcFieldConditions *field, s32 critMultiplier)
+#define APPLY_STAT_MOD(var, mon, stat, statIndex)                                   \
+{                                                                                   \
+    (var) = (stat) * (gStatStageRatios)[(mon)->statStages[(statIndex)]][0];         \
+    (var) /= (gStatStageRatios)[(mon)->statStages[(statIndex)]][1];                 \
+}
+
+u8 GetMoveType(const struct MoveContext *ctx, u16 move)
 {
-    const struct BattleMove *moveData = &gBattleMoves[move];
+    if (ctx->dynamicMoveType)
+        return ctx->dynamicMoveType & DYNAMIC_TYPE_MASK;
+    else
+        return gBattleMoves[move].type;
+}
+
+/* --- CalculateBaseDamage() (src/pokemon.c) ------------------------------ */
+
+s32 CalculateBaseDamage(struct MoveContext *ctx, const struct BattlePokemon *attacker,
+                        const struct BattlePokemon *defender, u32 move, u16 sideStatus,
+                        u16 powerOverride, u8 typeOverride, u8 battlerIdAtk, u8 battlerIdDef)
+{
+    const struct BattleState *s = ctx->s;
+    u32 i;
     s32 damage = 0;
     s32 damageHelper;
-    u8 type = moveData->type;
-    u16 gBattleMovePower = moveData->power;
+    u8 type;
     u16 attack, defense;
     u16 spAttack, spDefense;
-    u8 attackerHoldEffect = GetItemHoldEffect(attacker->item);
-    u8 attackerHoldEffectParam = GetItemHoldEffectParam(attacker->item);
-    u8 defenderHoldEffect = GetItemHoldEffect(defender->item);
-    u8 defenderHoldEffectParam = GetItemHoldEffectParam(defender->item);
-    u32 i;
+    u8 defenderHoldEffect;
+    u8 defenderHoldEffectParam;
+    u8 attackerHoldEffect;
+    u8 attackerHoldEffectParam;
+    u16 gBattleMovePower;
+
+    if (!powerOverride)
+        gBattleMovePower = gBattleMoves[move].power;
+    else
+        gBattleMovePower = powerOverride;
+
+    if (!typeOverride)
+        type = gBattleMoves[move].type;
+    else
+        type = typeOverride & DYNAMIC_TYPE_MASK;
 
     attack = attacker->attack;
     defense = defender->defense;
     spAttack = attacker->spAttack;
     spDefense = defender->spDefense;
 
+    // Get attacker hold item info
+    if (attacker->item == ITEM_ENIGMA_BERRY)
+    {
+        attackerHoldEffect = s->enigmaBerries[battlerIdAtk].holdEffect;
+        attackerHoldEffectParam = s->enigmaBerries[battlerIdAtk].holdEffectParam;
+    }
+    else
+    {
+        attackerHoldEffect = GetItemHoldEffect(attacker->item);
+        attackerHoldEffectParam = GetItemHoldEffectParam(attacker->item);
+    }
+
+    // Get defender hold item info
+    if (defender->item == ITEM_ENIGMA_BERRY)
+    {
+        defenderHoldEffect = s->enigmaBerries[battlerIdDef].holdEffect;
+        defenderHoldEffectParam = s->enigmaBerries[battlerIdDef].holdEffectParam;
+    }
+    else
+    {
+        defenderHoldEffect = GetItemHoldEffect(defender->item);
+        defenderHoldEffectParam = GetItemHoldEffectParam(defender->item);
+    }
+    (void)defenderHoldEffectParam; // read but unused in the original too
+
     if (attacker->ability == ABILITY_HUGE_POWER || attacker->ability == ABILITY_PURE_POWER)
         attack *= 2;
 
-    if (field->applyBadgeBoosts) {
+    if (ShouldGetStatBadgeBoost(s, FLAG_BADGE01_GET, battlerIdAtk))
         attack = (110 * attack) / 100;
+    if (ShouldGetStatBadgeBoost(s, FLAG_BADGE05_GET, battlerIdDef))
         defense = (110 * defense) / 100;
+    if (ShouldGetStatBadgeBoost(s, FLAG_BADGE07_GET, battlerIdAtk))
         spAttack = (110 * spAttack) / 100;
+    if (ShouldGetStatBadgeBoost(s, FLAG_BADGE07_GET, battlerIdDef))
         spDefense = (110 * spDefense) / 100;
-    }
 
-    for (i = 0; i < HOLD_EFFECT_TO_TYPE_COUNT; i++) {
-        if (attackerHoldEffect == sHoldEffectToType[i][0] && type == sHoldEffectToType[i][1]) {
+    // Apply type-bonus hold item
+    for (i = 0; i < HOLD_EFFECT_TO_TYPE_COUNT; i++)
+    {
+        if (attackerHoldEffect == sHoldEffectToType[i][0]
+            && type == sHoldEffectToType[i][1])
+        {
             if (IS_TYPE_PHYSICAL(type))
                 attack = (attack * (attackerHoldEffectParam + 100)) / 100;
             else
@@ -238,11 +293,12 @@ static s32 CalculateBaseDamage(const EmeraldCalcMon *attacker, const EmeraldCalc
         }
     }
 
+    // Apply boosts from hold items
     if (attackerHoldEffect == HOLD_EFFECT_CHOICE_BAND)
         attack = (150 * attack) / 100;
-    if (attackerHoldEffect == HOLD_EFFECT_SOUL_DEW && (attacker->species == SPECIES_LATIAS || attacker->species == SPECIES_LATIOS))
+    if (attackerHoldEffect == HOLD_EFFECT_SOUL_DEW && !(s->battleTypeFlags & (BATTLE_TYPE_FRONTIER)) && (attacker->species == SPECIES_LATIAS || attacker->species == SPECIES_LATIOS))
         spAttack = (150 * spAttack) / 100;
-    if (defenderHoldEffect == HOLD_EFFECT_SOUL_DEW && (defender->species == SPECIES_LATIAS || defender->species == SPECIES_LATIOS))
+    if (defenderHoldEffect == HOLD_EFFECT_SOUL_DEW && !(s->battleTypeFlags & (BATTLE_TYPE_FRONTIER)) && (defender->species == SPECIES_LATIAS || defender->species == SPECIES_LATIOS))
         spDefense = (150 * spDefense) / 100;
     if (attackerHoldEffect == HOLD_EFFECT_DEEP_SEA_TOOTH && attacker->species == SPECIES_CLAMPERL)
         spAttack *= 2;
@@ -255,249 +311,562 @@ static s32 CalculateBaseDamage(const EmeraldCalcMon *attacker, const EmeraldCalc
     if (attackerHoldEffect == HOLD_EFFECT_THICK_CLUB && (attacker->species == SPECIES_CUBONE || attacker->species == SPECIES_MAROWAK))
         attack *= 2;
 
+    // Apply abilities / field sports
     if (defender->ability == ABILITY_THICK_FAT && (type == TYPE_FIRE || type == TYPE_ICE))
         spAttack /= 2;
     if (attacker->ability == ABILITY_HUSTLE)
         attack = (150 * attack) / 100;
+    if (attacker->ability == ABILITY_PLUS && AbilityOnField2(s, ABILITY_MINUS))
+        spAttack = (150 * spAttack) / 100;
+    if (attacker->ability == ABILITY_MINUS && AbilityOnField2(s, ABILITY_PLUS))
+        spAttack = (150 * spAttack) / 100;
     if (attacker->ability == ABILITY_GUTS && attacker->status1)
         attack = (150 * attack) / 100;
     if (defender->ability == ABILITY_MARVEL_SCALE && defender->status1)
         defense = (150 * defense) / 100;
-    if (type == TYPE_GRASS && attacker->ability == ABILITY_OVERGROW && attacker->hp <= (attacker->maxHp / 3))
+    if (type == TYPE_ELECTRIC && FieldSportActive(s, STATUS3_MUDSPORT))
+        gBattleMovePower /= 2;
+    if (type == TYPE_FIRE && FieldSportActive(s, STATUS3_WATERSPORT))
+        gBattleMovePower /= 2;
+    if (type == TYPE_GRASS && attacker->ability == ABILITY_OVERGROW && attacker->hp <= (attacker->maxHP / 3))
         gBattleMovePower = (150 * gBattleMovePower) / 100;
-    if (type == TYPE_FIRE && attacker->ability == ABILITY_BLAZE && attacker->hp <= (attacker->maxHp / 3))
+    if (type == TYPE_FIRE && attacker->ability == ABILITY_BLAZE && attacker->hp <= (attacker->maxHP / 3))
         gBattleMovePower = (150 * gBattleMovePower) / 100;
-    if (type == TYPE_WATER && attacker->ability == ABILITY_TORRENT && attacker->hp <= (attacker->maxHp / 3))
+    if (type == TYPE_WATER && attacker->ability == ABILITY_TORRENT && attacker->hp <= (attacker->maxHP / 3))
         gBattleMovePower = (150 * gBattleMovePower) / 100;
-    if (type == TYPE_BUG && attacker->ability == ABILITY_SWARM && attacker->hp <= (attacker->maxHp / 3))
+    if (type == TYPE_BUG && attacker->ability == ABILITY_SWARM && attacker->hp <= (attacker->maxHP / 3))
         gBattleMovePower = (150 * gBattleMovePower) / 100;
 
-    if (moveData->effect == EFFECT_EXPLOSION)
+    // Self-destruct / Explosion cut defense in half
+    if (gBattleMoves[ctx->currentMove].effect == EFFECT_EXPLOSION)
         defense /= 2;
 
-    if (IS_TYPE_PHYSICAL(type)) {
-        if (critMultiplier == 2) {
+    if (IS_TYPE_PHYSICAL(type))
+    {
+        if (ctx->critMultiplier == 2)
+        {
+            // Critical hit, if attacker has lost attack stat stages then ignore stat drop
             if (attacker->statStages[STAT_ATK] > DEFAULT_STAT_STAGE)
-                APPLY_STAT_MOD(damage, attacker, attack, STAT_ATK);
+                APPLY_STAT_MOD(damage, attacker, attack, STAT_ATK)
             else
                 damage = attack;
-        } else {
-            APPLY_STAT_MOD(damage, attacker, attack, STAT_ATK);
         }
+        else
+            APPLY_STAT_MOD(damage, attacker, attack, STAT_ATK)
 
         damage = damage * gBattleMovePower;
         damage *= (2 * attacker->level / 5 + 2);
 
-        if (critMultiplier == 2) {
+        if (ctx->critMultiplier == 2)
+        {
+            // Critical hit, if defender has gained defense stat stages then ignore stat increase
             if (defender->statStages[STAT_DEF] < DEFAULT_STAT_STAGE)
-                APPLY_STAT_MOD(damageHelper, defender, defense, STAT_DEF);
+                APPLY_STAT_MOD(damageHelper, defender, defense, STAT_DEF)
             else
                 damageHelper = defense;
-        } else {
-            APPLY_STAT_MOD(damageHelper, defender, defense, STAT_DEF);
         }
+        else
+            APPLY_STAT_MOD(damageHelper, defender, defense, STAT_DEF)
 
         damage = damage / damageHelper;
         damage /= 50;
 
+        // Burn cuts attack in half
         if ((attacker->status1 & STATUS1_BURN) && attacker->ability != ABILITY_GUTS)
             damage /= 2;
 
-        if (field->targetHasReflect && critMultiplier == 1) {
-            if (field->isDoubleBattle && field->targetSideHasTwoAliveMons)
+        // Apply Reflect
+        if ((sideStatus & SIDE_STATUS_REFLECT) && ctx->critMultiplier == 1)
+        {
+            if ((s->battleTypeFlags & BATTLE_TYPE_DOUBLE) && CountAliveMonsInBattleDefSide(s, ctx->battlerTarget) == 2)
                 damage = 2 * (damage / 3);
             else
                 damage /= 2;
         }
 
-        if (field->isDoubleBattle && moveData->target == MOVE_TARGET_BOTH && field->targetSideHasTwoAliveMons)
+        // Moves hitting both targets do half damage in double battles
+        if ((s->battleTypeFlags & BATTLE_TYPE_DOUBLE) && gBattleMoves[move].target == MOVE_TARGET_BOTH && CountAliveMonsInBattleDefSide(s, ctx->battlerTarget) == 2)
             damage /= 2;
 
+        // Moves always do at least 1 damage.
         if (damage == 0)
             damage = 1;
     }
 
     if (type == TYPE_MYSTERY)
-        damage = 0;
+        damage = 0; // is ??? type. does 0 damage.
 
-    if (IS_TYPE_SPECIAL(type)) {
-        if (critMultiplier == 2) {
+    if (IS_TYPE_SPECIAL(type))
+    {
+        if (ctx->critMultiplier == 2)
+        {
+            // Critical hit, if attacker has lost sp. attack stat stages then ignore stat drop
             if (attacker->statStages[STAT_SPATK] > DEFAULT_STAT_STAGE)
-                APPLY_STAT_MOD(damage, attacker, spAttack, STAT_SPATK);
+                APPLY_STAT_MOD(damage, attacker, spAttack, STAT_SPATK)
             else
                 damage = spAttack;
-        } else {
-            APPLY_STAT_MOD(damage, attacker, spAttack, STAT_SPATK);
         }
+        else
+            APPLY_STAT_MOD(damage, attacker, spAttack, STAT_SPATK)
 
         damage = damage * gBattleMovePower;
         damage *= (2 * attacker->level / 5 + 2);
 
-        if (critMultiplier == 2) {
+        if (ctx->critMultiplier == 2)
+        {
+            // Critical hit, if defender has gained sp. defense stat stages then ignore stat increase
             if (defender->statStages[STAT_SPDEF] < DEFAULT_STAT_STAGE)
-                APPLY_STAT_MOD(damageHelper, defender, spDefense, STAT_SPDEF);
+                APPLY_STAT_MOD(damageHelper, defender, spDefense, STAT_SPDEF)
             else
                 damageHelper = spDefense;
-        } else {
-            APPLY_STAT_MOD(damageHelper, defender, spDefense, STAT_SPDEF);
         }
+        else
+            APPLY_STAT_MOD(damageHelper, defender, spDefense, STAT_SPDEF)
 
-        damage = damage / damageHelper;
+        damage = (damage / damageHelper);
         damage /= 50;
 
-        if (field->targetHasLightScreen && critMultiplier == 1) {
-            if (field->isDoubleBattle && field->targetSideHasTwoAliveMons)
+        // Apply Lightscreen
+        if ((sideStatus & SIDE_STATUS_LIGHTSCREEN) && ctx->critMultiplier == 1)
+        {
+            if ((s->battleTypeFlags & BATTLE_TYPE_DOUBLE) && CountAliveMonsInBattleDefSide(s, ctx->battlerTarget) == 2)
                 damage = 2 * (damage / 3);
             else
                 damage /= 2;
         }
 
-        if (field->isDoubleBattle && moveData->target == MOVE_TARGET_BOTH && field->targetSideHasTwoAliveMons)
+        // Moves hitting both targets do half damage in double battles
+        if ((s->battleTypeFlags & BATTLE_TYPE_DOUBLE) && gBattleMoves[move].target == MOVE_TARGET_BOTH && CountAliveMonsInBattleDefSide(s, ctx->battlerTarget) == 2)
             damage /= 2;
 
-        if (field->weather != 0) {
-            if (field->weather & B_WEATHER_RAIN_TEMPORARY) {
-                if (type == TYPE_FIRE)
+        // Are effects of weather negated with cloud nine or air lock
+        if (WeatherHasEffect2(s))
+        {
+            // Rain weakens Fire, boosts Water
+            if (s->battleWeather & B_WEATHER_RAIN_TEMPORARY)
+            {
+                switch (type)
+                {
+                case TYPE_FIRE:
                     damage /= 2;
-                else if (type == TYPE_WATER)
+                    break;
+                case TYPE_WATER:
                     damage = (15 * damage) / 10;
+                    break;
+                }
             }
-            if ((field->weather & (B_WEATHER_RAIN | B_WEATHER_SANDSTORM | B_WEATHER_HAIL)) && move == MOVE_SOLAR_BEAM)
+
+            // Any weather except sun weakens solar beam
+            if ((s->battleWeather & (B_WEATHER_RAIN | B_WEATHER_SANDSTORM | B_WEATHER_HAIL)) && ctx->currentMove == MOVE_SOLAR_BEAM)
                 damage /= 2;
-            if (field->weather & B_WEATHER_SUN) {
-                if (type == TYPE_FIRE)
+
+            // Sun boosts Fire, weakens Water
+            if (s->battleWeather & B_WEATHER_SUN)
+            {
+                switch (type)
+                {
+                case TYPE_FIRE:
                     damage = (15 * damage) / 10;
-                else if (type == TYPE_WATER)
+                    break;
+                case TYPE_WATER:
                     damage /= 2;
+                    break;
+                }
             }
         }
+
+        // Flash fire triggered
+        if ((s->resourceFlags[battlerIdAtk] & RESOURCE_FLAG_FLASH_FIRE) && type == TYPE_FIRE)
+            damage = (15 * damage) / 10;
     }
 
     return damage + 2;
 }
 
-/*
- * Ported from TypeCalc() (src/battle_script_commands.c:1536-1591), adapted
- * to operate on damage the caller passes in/out rather than the global
- * gBattleMoveDamage, and with the AttacksThisTurn()-gated Wonder Guard
- * double-strike carve-out dropped (that's a specific-move-sequence check
- * we have no turn context for; Wonder Guard's real effect --
- * DOESNT_AFFECT_FOE unless the move is super effective -- still applies).
- */
-static void ApplyTypeEffectiveness(u16 move, const EmeraldCalcMon *attacker, const EmeraldCalcMon *defender,
-                                    s32 *damage, u8 *flags)
+/* --- damagecalc / typecalc / typecalc2 ----------------------------------- */
+
+void Cmd_damagecalc(struct MoveContext *ctx)
 {
-    const struct BattleMove *moveData = &gBattleMoves[move];
-    u8 moveType = moveData->type;
-    s32 i = 0;
+    const struct BattleState *s = ctx->s;
+    u16 sideStatus = ctx->sideStatuses[GetBattlerSide(s, ctx->battlerTarget)];
 
-    *flags = 0;
+    ctx->battleMoveDamage = CalculateBaseDamage(ctx, &s->battleMons[ctx->battlerAttacker], &s->battleMons[ctx->battlerTarget], ctx->currentMove,
+                                                sideStatus, ctx->dynamicBasePower,
+                                                ctx->dynamicMoveType, ctx->battlerAttacker, ctx->battlerTarget);
+    ctx->battleMoveDamage = ctx->battleMoveDamage * ctx->critMultiplier * ctx->dmgMultiplier;
 
-    if (attacker->types[0] == moveType || attacker->types[1] == moveType) {
-        *damage = *damage * 15;
-        *damage = *damage / 10;
-    }
-
-    if (defender->ability == ABILITY_LEVITATE && moveType == TYPE_GROUND) {
-        *flags |= (EMERALD_MOVE_RESULT_MISSED | EMERALD_MOVE_RESULT_DOESNT_AFFECT_FOE);
-        return;
-    }
-
-    while (TYPE_EFFECT_ATK_TYPE(i) != TYPE_ENDTABLE) {
-        if (TYPE_EFFECT_ATK_TYPE(i) == TYPE_FORESIGHT) {
-            i += 3;
-            continue;
-        }
-        if (TYPE_EFFECT_ATK_TYPE(i) == moveType) {
-            u8 multiplier;
-            if (TYPE_EFFECT_DEF_TYPE(i) == defender->types[0]) {
-                multiplier = TYPE_EFFECT_MULTIPLIER(i);
-                *damage = *damage * multiplier / 10;
-                if (*damage == 0 && multiplier != 0)
-                    *damage = 1;
-                if (multiplier == TYPE_MUL_NO_EFFECT) {
-                    *flags |= EMERALD_MOVE_RESULT_DOESNT_AFFECT_FOE;
-                    *flags &= ~(EMERALD_MOVE_RESULT_NOT_VERY_EFFECTIVE | EMERALD_MOVE_RESULT_SUPER_EFFECTIVE);
-                } else if (multiplier == TYPE_MUL_NOT_EFFECTIVE && moveData->power) {
-                    if (*flags & EMERALD_MOVE_RESULT_SUPER_EFFECTIVE)
-                        *flags &= ~EMERALD_MOVE_RESULT_SUPER_EFFECTIVE;
-                    else
-                        *flags |= EMERALD_MOVE_RESULT_NOT_VERY_EFFECTIVE;
-                } else if (multiplier == TYPE_MUL_SUPER_EFFECTIVE && moveData->power) {
-                    if (*flags & EMERALD_MOVE_RESULT_NOT_VERY_EFFECTIVE)
-                        *flags &= ~EMERALD_MOVE_RESULT_NOT_VERY_EFFECTIVE;
-                    else
-                        *flags |= EMERALD_MOVE_RESULT_SUPER_EFFECTIVE;
-                }
-            }
-            if (TYPE_EFFECT_DEF_TYPE(i) == defender->types[1] && defender->types[0] != defender->types[1]) {
-                multiplier = TYPE_EFFECT_MULTIPLIER(i);
-                *damage = *damage * multiplier / 10;
-                if (*damage == 0 && multiplier != 0)
-                    *damage = 1;
-                if (multiplier == TYPE_MUL_NO_EFFECT) {
-                    *flags |= EMERALD_MOVE_RESULT_DOESNT_AFFECT_FOE;
-                    *flags &= ~(EMERALD_MOVE_RESULT_NOT_VERY_EFFECTIVE | EMERALD_MOVE_RESULT_SUPER_EFFECTIVE);
-                } else if (multiplier == TYPE_MUL_NOT_EFFECTIVE && moveData->power) {
-                    if (*flags & EMERALD_MOVE_RESULT_SUPER_EFFECTIVE)
-                        *flags &= ~EMERALD_MOVE_RESULT_SUPER_EFFECTIVE;
-                    else
-                        *flags |= EMERALD_MOVE_RESULT_NOT_VERY_EFFECTIVE;
-                } else if (multiplier == TYPE_MUL_SUPER_EFFECTIVE && moveData->power) {
-                    if (*flags & EMERALD_MOVE_RESULT_NOT_VERY_EFFECTIVE)
-                        *flags &= ~EMERALD_MOVE_RESULT_NOT_VERY_EFFECTIVE;
-                    else
-                        *flags |= EMERALD_MOVE_RESULT_SUPER_EFFECTIVE;
-                }
-            }
-        }
-        i += 3;
-    }
-
-    if (defender->ability == ABILITY_WONDER_GUARD
-        && !(*flags & (EMERALD_MOVE_RESULT_SUPER_EFFECTIVE)) && moveData->power)
-        *flags |= EMERALD_MOVE_RESULT_DOESNT_AFFECT_FOE;
+    if (s->statuses3[ctx->battlerAttacker] & STATUS3_CHARGED_UP && gBattleMoves[ctx->currentMove].type == TYPE_ELECTRIC)
+        ctx->battleMoveDamage *= 2;
+    if (s->protectStructs[ctx->battlerAttacker].helpingHand)
+        ctx->battleMoveDamage = ctx->battleMoveDamage * 15 / 10;
 }
 
-/* Ported from Cmd_critcalc (src/battle_script_commands.c:1253-1287),
- * returning a probability instead of rolling Random() -- this tool
- * predicts, it doesn't play a turn. gStatuses3 CANT_SCORE_A_CRIT and the
- * tutorial/first-battle no-crit flags aren't tracked (no turn/overworld
- * context); both default to "not blocked". */
-static double CritChance(const EmeraldCalcMon *attacker, const EmeraldCalcMon *defender, u16 move)
+static void ModulateDmgByType(struct MoveContext *ctx, u8 multiplier)
 {
-    const struct BattleMove *moveData = &gBattleMoves[move];
-    u8 holdEffect = GetItemHoldEffect(attacker->item);
-    u32 critChance = 2 * (attacker->hasFocusEnergy != 0)
-                    + (moveData->effect == EFFECT_HIGH_CRITICAL)
-                    + (moveData->effect == EFFECT_SKY_ATTACK)
-                    + (moveData->effect == EFFECT_BLAZE_KICK)
-                    + (moveData->effect == EFFECT_POISON_TAIL)
-                    + (holdEffect == HOLD_EFFECT_SCOPE_LENS)
-                    + 2 * (holdEffect == HOLD_EFFECT_LUCKY_PUNCH && attacker->species == SPECIES_CHANSEY)
-                    + 2 * (holdEffect == HOLD_EFFECT_STICK && attacker->species == SPECIES_FARFETCHD);
+    ctx->battleMoveDamage = ctx->battleMoveDamage * multiplier / 10;
+    if (ctx->battleMoveDamage == 0 && multiplier != 0)
+        ctx->battleMoveDamage = 1;
+
+    switch (multiplier)
+    {
+    case TYPE_MUL_NO_EFFECT:
+        ctx->moveResultFlags |= MOVE_RESULT_DOESNT_AFFECT_FOE;
+        ctx->moveResultFlags &= ~MOVE_RESULT_NOT_VERY_EFFECTIVE;
+        ctx->moveResultFlags &= ~MOVE_RESULT_SUPER_EFFECTIVE;
+        break;
+    case TYPE_MUL_NOT_EFFECTIVE:
+        if (gBattleMoves[ctx->currentMove].power && !(ctx->moveResultFlags & MOVE_RESULT_NO_EFFECT))
+        {
+            if (ctx->moveResultFlags & MOVE_RESULT_SUPER_EFFECTIVE)
+                ctx->moveResultFlags &= ~MOVE_RESULT_SUPER_EFFECTIVE;
+            else
+                ctx->moveResultFlags |= MOVE_RESULT_NOT_VERY_EFFECTIVE;
+        }
+        break;
+    case TYPE_MUL_SUPER_EFFECTIVE:
+        if (gBattleMoves[ctx->currentMove].power && !(ctx->moveResultFlags & MOVE_RESULT_NO_EFFECT))
+        {
+            if (ctx->moveResultFlags & MOVE_RESULT_NOT_VERY_EFFECTIVE)
+                ctx->moveResultFlags &= ~MOVE_RESULT_NOT_VERY_EFFECTIVE;
+            else
+                ctx->moveResultFlags |= MOVE_RESULT_SUPER_EFFECTIVE;
+        }
+        break;
+    }
+}
+
+/* AttacksThisTurn(gBattlerAttacker, gCurrentMove) == 2 in the Wonder Guard
+ * checks below: it's only 1 on a two-turn move's charging turn
+ * (HITMARKER_CHARGING), and the simulation is always of the turn that
+ * deals damage. */
+void Cmd_typecalc(struct MoveContext *ctx)
+{
+    const struct BattleState *s = ctx->s;
+    const struct BattlePokemon *target = &s->battleMons[ctx->battlerTarget];
+    s32 i = 0;
+    u8 moveType;
+
+    if (ctx->currentMove == MOVE_STRUGGLE)
+        return;
+
+    moveType = GetMoveType(ctx, ctx->currentMove);
+
+    // check stab
+    if (IsBattlerOfType(s, ctx->battlerAttacker, moveType))
+    {
+        ctx->battleMoveDamage = ctx->battleMoveDamage * 15;
+        ctx->battleMoveDamage = ctx->battleMoveDamage / 10;
+    }
+
+    if (target->ability == ABILITY_LEVITATE && moveType == TYPE_GROUND)
+    {
+        ctx->lastUsedAbility = target->ability;
+        ctx->moveResultFlags |= (MOVE_RESULT_MISSED | MOVE_RESULT_DOESNT_AFFECT_FOE);
+    }
+    else
+    {
+        while (TYPE_EFFECT_ATK_TYPE(i) != TYPE_ENDTABLE)
+        {
+            if (TYPE_EFFECT_ATK_TYPE(i) == TYPE_FORESIGHT)
+            {
+                if (target->status2 & STATUS2_FORESIGHT)
+                    break;
+                i += 3;
+                continue;
+            }
+            else if (TYPE_EFFECT_ATK_TYPE(i) == moveType)
+            {
+                // check type1
+                if (TYPE_EFFECT_DEF_TYPE(i) == target->types[0])
+                    ModulateDmgByType(ctx, TYPE_EFFECT_MULTIPLIER(i));
+                // check type2
+                if (TYPE_EFFECT_DEF_TYPE(i) == target->types[1] &&
+                    target->types[0] != target->types[1])
+                    ModulateDmgByType(ctx, TYPE_EFFECT_MULTIPLIER(i));
+            }
+            i += 3;
+        }
+    }
+
+    if (target->ability == ABILITY_WONDER_GUARD /* && AttacksThisTurn(...) == 2 */
+     && (!(ctx->moveResultFlags & MOVE_RESULT_SUPER_EFFECTIVE) || ((ctx->moveResultFlags & (MOVE_RESULT_SUPER_EFFECTIVE | MOVE_RESULT_NOT_VERY_EFFECTIVE)) == (MOVE_RESULT_SUPER_EFFECTIVE | MOVE_RESULT_NOT_VERY_EFFECTIVE)))
+     && gBattleMoves[ctx->currentMove].power)
+    {
+        ctx->lastUsedAbility = ABILITY_WONDER_GUARD;
+        ctx->moveResultFlags |= MOVE_RESULT_MISSED;
+    }
+}
+
+/* Used by Counter/Mirror Coat/Rollout: checks immunity but never touches
+ * gBattleMoveDamage, and reads the move's static type. */
+void Cmd_typecalc2(struct MoveContext *ctx)
+{
+    const struct BattleState *s = ctx->s;
+    const struct BattlePokemon *target = &s->battleMons[ctx->battlerTarget];
+    u8 flags = 0;
+    s32 i = 0;
+    u8 moveType = gBattleMoves[ctx->currentMove].type;
+
+    if (target->ability == ABILITY_LEVITATE && moveType == TYPE_GROUND)
+    {
+        ctx->lastUsedAbility = target->ability;
+        ctx->moveResultFlags |= (MOVE_RESULT_MISSED | MOVE_RESULT_DOESNT_AFFECT_FOE);
+    }
+    else
+    {
+        while (TYPE_EFFECT_ATK_TYPE(i) != TYPE_ENDTABLE)
+        {
+            if (TYPE_EFFECT_ATK_TYPE(i) == TYPE_FORESIGHT)
+            {
+                if (target->status2 & STATUS2_FORESIGHT)
+                {
+                    break;
+                }
+                else
+                {
+                    i += 3;
+                    continue;
+                }
+            }
+
+            if (TYPE_EFFECT_ATK_TYPE(i) == moveType)
+            {
+                // check type1
+                if (TYPE_EFFECT_DEF_TYPE(i) == target->types[0])
+                {
+                    if (TYPE_EFFECT_MULTIPLIER(i) == TYPE_MUL_NO_EFFECT)
+                    {
+                        ctx->moveResultFlags |= MOVE_RESULT_DOESNT_AFFECT_FOE;
+                        break;
+                    }
+                    if (TYPE_EFFECT_MULTIPLIER(i) == TYPE_MUL_NOT_EFFECTIVE)
+                    {
+                        flags |= MOVE_RESULT_NOT_VERY_EFFECTIVE;
+                    }
+                    if (TYPE_EFFECT_MULTIPLIER(i) == TYPE_MUL_SUPER_EFFECTIVE)
+                    {
+                        flags |= MOVE_RESULT_SUPER_EFFECTIVE;
+                    }
+                }
+                // check type2
+                if (TYPE_EFFECT_DEF_TYPE(i) == target->types[1])
+                {
+                    if (target->types[0] != target->types[1]
+                        && TYPE_EFFECT_MULTIPLIER(i) == TYPE_MUL_NO_EFFECT)
+                    {
+                        ctx->moveResultFlags |= MOVE_RESULT_DOESNT_AFFECT_FOE;
+                        break;
+                    }
+                    if (TYPE_EFFECT_DEF_TYPE(i) == target->types[1]
+                        && target->types[0] != target->types[1]
+                        && TYPE_EFFECT_MULTIPLIER(i) == TYPE_MUL_NOT_EFFECTIVE)
+                    {
+                        flags |= MOVE_RESULT_NOT_VERY_EFFECTIVE;
+                    }
+                    if (TYPE_EFFECT_DEF_TYPE(i) == target->types[1]
+                        && target->types[0] != target->types[1]
+                        && TYPE_EFFECT_MULTIPLIER(i) == TYPE_MUL_SUPER_EFFECTIVE)
+                    {
+                        flags |= MOVE_RESULT_SUPER_EFFECTIVE;
+                    }
+                }
+            }
+            i += 3;
+        }
+    }
+
+    if (target->ability == ABILITY_WONDER_GUARD
+        && !(flags & MOVE_RESULT_NO_EFFECT)
+        /* && AttacksThisTurn(...) == 2 */
+        && (!(flags & MOVE_RESULT_SUPER_EFFECTIVE) || ((flags & (MOVE_RESULT_SUPER_EFFECTIVE | MOVE_RESULT_NOT_VERY_EFFECTIVE)) == (MOVE_RESULT_SUPER_EFFECTIVE | MOVE_RESULT_NOT_VERY_EFFECTIVE)))
+        && gBattleMoves[ctx->currentMove].power)
+    {
+        ctx->lastUsedAbility = ABILITY_WONDER_GUARD;
+        ctx->moveResultFlags |= MOVE_RESULT_MISSED;
+    }
+}
+
+/* --- critcalc -------------------------------------------------------------- */
+
+double CritChance(const struct MoveContext *ctx)
+{
+    const struct BattleState *s = ctx->s;
+    const struct BattlePokemon *attacker = &s->battleMons[ctx->battlerAttacker];
+    u8 holdEffect, holdEffectParam;
+    u16 critChance;
+
+    GetBattlerHoldEffect(s, ctx->battlerAttacker, &holdEffect, &holdEffectParam);
+
+    critChance  = 2 * ((attacker->status2 & STATUS2_FOCUS_ENERGY) != 0)
+                + (gBattleMoves[ctx->currentMove].effect == EFFECT_HIGH_CRITICAL)
+                + (gBattleMoves[ctx->currentMove].effect == EFFECT_SKY_ATTACK)
+                + (gBattleMoves[ctx->currentMove].effect == EFFECT_BLAZE_KICK)
+                + (gBattleMoves[ctx->currentMove].effect == EFFECT_POISON_TAIL)
+                + (holdEffect == HOLD_EFFECT_SCOPE_LENS)
+                + 2 * (holdEffect == HOLD_EFFECT_LUCKY_PUNCH && attacker->species == SPECIES_CHANSEY)
+                + 2 * (holdEffect == HOLD_EFFECT_STICK && attacker->species == SPECIES_FARFETCHD);
 
     if (critChance >= CRIT_CHANCE_TABLE_SIZE)
         critChance = CRIT_CHANCE_TABLE_SIZE - 1;
 
-    if (defender->ability == ABILITY_BATTLE_ARMOR || defender->ability == ABILITY_SHELL_ARMOR)
+    if ((s->battleMons[ctx->battlerTarget].ability != ABILITY_BATTLE_ARMOR && s->battleMons[ctx->battlerTarget].ability != ABILITY_SHELL_ARMOR)
+     && !(s->statuses3[ctx->battlerAttacker] & STATUS3_CANT_SCORE_A_CRIT)
+     && !(s->battleTypeFlags & (BATTLE_TYPE_WALLY_TUTORIAL | BATTLE_TYPE_FIRST_BATTLE)))
+        return RandomModEquals(sCriticalHitChance[critChance], 0); // !(Random() % sCriticalHitChance[critChance])
+    else
         return 0.0;
-
-    return 1.0 / sCriticalHitChance[critChance];
 }
 
-static EmeraldCalcRollSet BuildRollSet(s32 baseDamage)
+/* --- accuracycheck --------------------------------------------------------- */
+
+/* DEFENDER_IS_PROTECTED */
+static bool8 DefenderIsProtected(const struct MoveContext *ctx)
+{
+    return ctx->s->protectStructs[ctx->battlerTarget].protected_
+        && (gBattleMoves[ctx->currentMove].flags & FLAG_PROTECT_AFFECTED);
+}
+
+/* AccuracyCalcHelper(): returns TRUE when the outcome is decided without
+ * rolling -- *hitChance then holds it. */
+static bool8 AccuracyCalcHelper(const struct MoveContext *ctx, u16 move, double *hitChance, u8 *missReason)
+{
+    const struct BattleState *s = ctx->s;
+    u8 target = ctx->battlerTarget;
+
+    if (s->statuses3[target] & STATUS3_ALWAYS_HITS && s->disableStructs[target].battlerWithSureHit == ctx->battlerAttacker)
+    {
+        *hitChance = 1.0;
+        return TRUE;
+    }
+
+    if (!(ctx->hitMarker & HITMARKER_IGNORE_ON_AIR) && s->statuses3[target] & STATUS3_ON_AIR)
+    {
+        *hitChance = 0.0;
+        *missReason = EMERALD_REASON_TARGET_SEMI_INVULNERABLE;
+        return TRUE;
+    }
+
+    if (!(ctx->hitMarker & HITMARKER_IGNORE_UNDERGROUND) && s->statuses3[target] & STATUS3_UNDERGROUND)
+    {
+        *hitChance = 0.0;
+        *missReason = EMERALD_REASON_TARGET_SEMI_INVULNERABLE;
+        return TRUE;
+    }
+
+    if (!(ctx->hitMarker & HITMARKER_IGNORE_UNDERWATER) && s->statuses3[target] & STATUS3_UNDERWATER)
+    {
+        *hitChance = 0.0;
+        *missReason = EMERALD_REASON_TARGET_SEMI_INVULNERABLE;
+        return TRUE;
+    }
+
+    if ((WeatherHasEffect(s) && (s->battleWeather & B_WEATHER_RAIN) && gBattleMoves[move].effect == EFFECT_THUNDER)
+     || (gBattleMoves[move].effect == EFFECT_ALWAYS_HIT || gBattleMoves[move].effect == EFFECT_VITAL_THROW))
+    {
+        *hitChance = 1.0;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+double AccuracyCheck(const struct MoveContext *ctx, u16 move, u8 *missReason)
+{
+    const struct BattleState *s = ctx->s;
+    const struct BattlePokemon *attacker = &s->battleMons[ctx->battlerAttacker];
+    const struct BattlePokemon *target = &s->battleMons[ctx->battlerTarget];
+    double hitChance;
+
+    *missReason = EMERALD_REASON_NONE;
+
+    if (move == NO_ACC_CALC || move == NO_ACC_CALC_CHECK_LOCK_ON)
+    {
+        if (s->statuses3[ctx->battlerTarget] & STATUS3_ALWAYS_HITS && move == NO_ACC_CALC_CHECK_LOCK_ON && s->disableStructs[ctx->battlerTarget].battlerWithSureHit == ctx->battlerAttacker)
+            return 1.0;
+        else if (s->statuses3[ctx->battlerTarget] & (STATUS3_ON_AIR | STATUS3_UNDERGROUND | STATUS3_UNDERWATER))
+        {
+            *missReason = EMERALD_REASON_TARGET_SEMI_INVULNERABLE;
+            return 0.0;
+        }
+        else if (DefenderIsProtected(ctx)) // !JumpIfMoveAffectedByProtect(0)
+        {
+            *missReason = EMERALD_REASON_TARGET_PROTECTED;
+            return 0.0;
+        }
+        return 1.0;
+    }
+    else
+    {
+        u8 type, moveAcc, holdEffect, param;
+        s8 buff;
+        u16 calc;
+
+        if (move == ACC_CURR_MOVE)
+            move = ctx->currentMove;
+
+        type = GetMoveType(ctx, move);
+
+        if (DefenderIsProtected(ctx)) // JumpIfMoveAffectedByProtect(move)
+        {
+            *missReason = EMERALD_REASON_TARGET_PROTECTED;
+            return 0.0;
+        }
+        if (AccuracyCalcHelper(ctx, move, &hitChance, missReason))
+            return hitChance;
+
+        if (target->status2 & STATUS2_FORESIGHT)
+        {
+            u8 acc = attacker->statStages[STAT_ACC];
+            buff = acc;
+        }
+        else
+        {
+            u8 acc = attacker->statStages[STAT_ACC];
+            buff = acc + DEFAULT_STAT_STAGE - target->statStages[STAT_EVASION];
+        }
+
+        if (buff < MIN_STAT_STAGE)
+            buff = MIN_STAT_STAGE;
+        if (buff > MAX_STAT_STAGE)
+            buff = MAX_STAT_STAGE;
+
+        moveAcc = gBattleMoves[move].accuracy;
+        // check Thunder on sunny weather
+        if (WeatherHasEffect(s) && s->battleWeather & B_WEATHER_SUN && gBattleMoves[move].effect == EFFECT_THUNDER)
+            moveAcc = 50;
+
+        calc = sAccuracyStageRatios[buff].dividend * moveAcc;
+        calc /= sAccuracyStageRatios[buff].divisor;
+
+        if (attacker->ability == ABILITY_COMPOUND_EYES)
+            calc = (calc * 130) / 100; // 1.3 compound eyes boost
+        if (WeatherHasEffect(s) && target->ability == ABILITY_SAND_VEIL && s->battleWeather & B_WEATHER_SANDSTORM)
+            calc = (calc * 80) / 100; // 1.2 sand veil loss
+        if (attacker->ability == ABILITY_HUSTLE && IS_TYPE_PHYSICAL(type))
+            calc = (calc * 80) / 100; // 1.2 hustle loss
+
+        GetBattlerHoldEffect(s, ctx->battlerTarget, &holdEffect, &param);
+
+        if (holdEffect == HOLD_EFFECT_EVASION_UP)
+            calc = (calc * (100 - param)) / 100;
+
+        // final calculation: misses when (Random() % 100 + 1) > calc
+        return RandomModBelow(100, calc);
+    }
+}
+
+/* --- adjustnormaldamage's random roll -------------------------------------- */
+
+EmeraldCalcRollSet RandomDamageRolls(s32 damage)
 {
     EmeraldCalcRollSet set;
     int i;
 
-    /* Ported from ApplyRandomDmgMultiplier() (src/battle_script_commands.c:
-     * 1639-1651): randPercent = 100 - (rand % 16) for rand = Random(), i.e.
-     * every value 85..100 inclusive occurs for exactly one rand%16 value.
-     * Enumerated here instead of rolled. */
+    /* ApplyRandomDmgMultiplier(): randPercent = 100 - (Random() % 16), so
+     * each of 85..100 comes up for exactly one residue. */
     for (i = 0; i < EMERALD_CALC_NUM_ROLLS; i++) {
         s32 randPercent = 100 - i;
-        s32 d = baseDamage;
+        s32 d = damage;
         if (d != 0) {
             d *= randPercent;
             d /= 100;
@@ -511,66 +880,13 @@ static EmeraldCalcRollSet BuildRollSet(s32 baseDamage)
     return set;
 }
 
-EmeraldCalcResult EmeraldCalc_ComputeDamage(const EmeraldCalcMon *attacker, const EmeraldCalcMon *defender,
-                                             u16 move, const EmeraldCalcFieldConditions *field)
+EmeraldCalcRollSet FixedDamageRolls(s32 damage)
 {
-    EmeraldCalcResult result;
-    const struct BattleMove *moveData = &gBattleMoves[move];
-    s32 normalBase, critBase;
+    EmeraldCalcRollSet set;
+    int i;
 
-    memset(&result, 0, sizeof(result));
-
-    if (moveData->power == 0) {
-        result.movePowerIsZero = TRUE;
-        return result;
-    }
-
-    normalBase = CalculateBaseDamage(attacker, defender, move, field, 1);
-    critBase = CalculateBaseDamage(attacker, defender, move, field, 2);
-
-    if (field->attackerIsCharged && moveData->type == TYPE_ELECTRIC) {
-        normalBase *= 2;
-        critBase *= 2;
-    }
-    if (field->attackerHasHelpingHand) {
-        normalBase = normalBase * 15 / 10;
-        critBase = critBase * 15 / 10;
-    }
-
-    ApplyTypeEffectiveness(move, attacker, defender, &normalBase, &result.typeEffectivenessFlags);
-    {
-        u8 unusedFlags;
-        ApplyTypeEffectiveness(move, attacker, defender, &critBase, &unusedFlags);
-    }
-
-    result.isImmune = (result.typeEffectivenessFlags & EMERALD_MOVE_RESULT_NO_EFFECT) ? TRUE : FALSE;
-    if (result.isImmune) {
-        normalBase = 0;
-        critBase = 0;
-    }
-
-    result.normal = BuildRollSet(normalBase);
-    result.critical = BuildRollSet(critBase);
-    result.critChance = CritChance(attacker, defender, move);
-
-    return result;
-}
-
-EmeraldCalcKOChances EmeraldCalc_KOChances(const EmeraldCalcRollSet *rolls, u16 targetHp, u8 moveAccuracy)
-{
-    EmeraldCalcKOChances result;
-    int i, koCount = 0;
-    u8 acc = moveAccuracy == 0 ? 100 : moveAccuracy;
-
-    for (i = 0; i < EMERALD_CALC_NUM_ROLLS; i++) {
-        if (rolls->rolls[i] >= targetHp)
-            koCount++;
-    }
-
-    result.ohkoChance = (double)koCount / EMERALD_CALC_NUM_ROLLS;
-    result.accuracyAdjustedOhkoChance = result.ohkoChance * acc / 100.0;
-    result.guaranteedKoTurns = rolls->min > 0 ? (s32)((targetHp + rolls->min - 1) / rolls->min) : -1;
-    result.possibleKoTurns = rolls->max > 0 ? (s32)((targetHp + rolls->max - 1) / rolls->max) : -1;
-
-    return result;
+    for (i = 0; i < EMERALD_CALC_NUM_ROLLS; i++)
+        set.rolls[i] = damage;
+    set.min = set.max = damage;
+    return set;
 }

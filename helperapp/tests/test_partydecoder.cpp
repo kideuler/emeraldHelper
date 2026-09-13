@@ -134,8 +134,12 @@ TEST(PartyDecoder, DecodePartyMonReportsInvalidOnChecksumMismatch)
     const QByteArray raw = buildRawPokemon(personality, otId, encrypted, /*checksum=*/0xFFFF,
                                             /*level=*/50, /*hp=*/1, /*maxHp=*/1);
 
-    const PartyMon mon = decodePartyMon(raw);
-    EXPECT_FALSE(mon.valid);
+    bool checksumOk = true;
+    const PartyPokemon mon = decodePartyPokemon(raw, &checksumOk);
+    EXPECT_FALSE(checksumOk);
+    // GetBoxMonData() turns a checksum mismatch into a Bad Egg; so does the decoder.
+    EXPECT_TRUE(mon.isBadEgg);
+    EXPECT_TRUE(mon.isEgg);
 }
 
 TEST(PartyDecoder, DecodePartyMonProducesAValidMonForACorrectChecksum)
@@ -149,12 +153,14 @@ TEST(PartyDecoder, DecodePartyMonProducesAValidMonForACorrectChecksum)
     const QByteArray raw =
         buildRawPokemon(personality, otId, encrypted, checksum, /*level=*/50, /*hp=*/120, /*maxHp=*/140);
 
-    const PartyMon mon = decodePartyMon(raw);
-    EXPECT_TRUE(mon.valid);
+    bool checksumOk = false;
+    const PartyPokemon mon = decodePartyPokemon(raw, &checksumOk);
+    EXPECT_TRUE(checksumOk);
+    EXPECT_FALSE(mon.isBadEgg);
     EXPECT_EQ(mon.species, 6);
     EXPECT_EQ(mon.level, 50);
     EXPECT_EQ(mon.hp, 120);
-    EXPECT_EQ(mon.maxHp, 140);
+    EXPECT_EQ(mon.maxHP, 140);
     EXPECT_EQ(mon.moves[0], 80);
     EXPECT_EQ(mon.moves[1], 82);
 }

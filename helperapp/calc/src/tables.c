@@ -32,9 +32,15 @@ u8 GetItemHoldEffectParam(u16 itemId)
     return sItemHoldEffectParam[itemId];
 }
 
-EmeraldCalcFieldConditions EmeraldCalc_DefaultField(void)
+void BattleState_Init(struct BattleState *s)
 {
-    EmeraldCalcFieldConditions field;
-    memset(&field, 0, sizeof(field));
-    return field;
+    int i, j;
+
+    memset(s, 0, sizeof(*s));
+    s->battlersCount = 2;
+    for (i = 0; i < MAX_BATTLERS_COUNT; i++) {
+        s->battlerPositions[i] = (u8)i;
+        for (j = 0; j < NUM_BATTLE_STATS; j++)
+            s->battleMons[i].statStages[j] = DEFAULT_STAT_STAGE;
+    }
 }

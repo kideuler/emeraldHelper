@@ -44,16 +44,22 @@ else()
 endif()
 set(ASFLAGS -mcpu=arm7tdmi --defsym MODERN=${MODERN_INT})
 
+# Object/link steps that invoke the agbcc compiler binaries or link
+# against its libgcc.a/libc.a need to depend on agbcc_toolchain (from
+# cmake/Agbcc.cmake) so `cmake --build` builds/installs agbcc first
+# instead of failing on a missing binary. Empty (no dependency) under
+# MODERN=ON, where that target doesn't exist.
+if(NOT MODERN)
+  set(AGBCC_DEP agbcc_toolchain)
+else()
+  set(AGBCC_DEP)
+endif()
+
 # --- Per-variant CPP / CC1 / CFLAGS / LIB selection ---
 if(NOT MODERN)
-  set(AGBCC_DIR ${CMAKE_SOURCE_DIR}/tools/agbcc)
-  if(NOT EXISTS ${AGBCC_DIR}/bin/agbcc)
-    message(FATAL_ERROR
-      "tools/agbcc is missing. The matching build needs the external "
-      "agbcc compiler installed there (see INSTALL.md; it's a separate "
-      "repo, not part of pokeemerald). Configure with -DMODERN=ON to use "
-      "the modern arm-none-eabi-gcc build instead, which doesn't need it.")
-  endif()
+  # AGBCC_DIR is set by cmake/Agbcc.cmake (included before this file),
+  # which also arranges for tools/agbcc to be built from the ./agbcc
+  # submodule as a build (not configure-time) dependency -- see there.
   set(CC1 ${AGBCC_DIR}/bin/agbcc)
   set(OLD_CC1 ${AGBCC_DIR}/bin/old_agbcc)
   set(ARM_CC1 ${AGBCC_DIR}/bin/agbcc_arm)
@@ -173,7 +179,7 @@ foreach(src ${C_SRCS})
             "${obj_cc1}" "${obj_cflags}"
             "${CROSS_AS}" "${ASFLAGS_STR}"
             "${src}" "${obj}"
-    DEPENDS ${src} preproc generate_assets
+    DEPENDS ${src} preproc generate_assets ${AGBCC_DEP}
     # preproc resolves INCBIN_U8/U16/U32 paths (as opposed to INCGFX_*,
     # which get the -g assets-root prefix) relative to its own CWD, which
     # the Makefile leaves at the repo root.
@@ -313,7 +319,7 @@ add_custom_command(
           ${CROSS_LD} -Map ${MAP_REL} -T ${LD_SCRIPT_REL} --print-memory-usage
           -o ${ELF_REL} ${OBJS_REL} ${LIB}
   COMMAND $<TARGET_FILE:gbafix> ${ELF} -t${TITLE} -c${GAME_CODE} -m${MAKER_CODE} -r${REVISION} --silent
-  DEPENDS ${LD_SCRIPT} ${LD_SCRIPT_DEPS} ${ALL_OBJS} libagbsyscall gbafix
+  DEPENDS ${LD_SCRIPT} ${LD_SCRIPT_DEPS} ${ALL_OBJS} libagbsyscall gbafix ${AGBCC_DEP}
   COMMENT "Linking ${ROM_NAME}"
   VERBATIM
 )

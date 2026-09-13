@@ -9,9 +9,12 @@ cmake_minimum_required(VERSION 3.20)
 # flag, selected via -DMODERN=ON/OFF at configure time (a variant switch,
 # not a regular CMake option a user toggles post-configure, since it
 # changes which compiler and which linker script are used):
-#   -DMODERN=OFF (default) - "matching" build using the external agbcc
-#                 compiler (see INSTALL.md), byte-identical to retail when
-#                 the `compare` target is run against rom.sha1.
+#   -DMODERN=OFF (default) - "matching" build using the agbcc compiler
+#                 (built from the ./agbcc submodule and installed to
+#                 tools/agbcc automatically -- see cmake/Agbcc.cmake, no
+#                 manual INSTALL.md step needed), byte-identical to
+#                 retail when the `compare` target is run against
+#                 rom.sha1.
 #   -DMODERN=ON  - modern arm-none-eabi-gcc build, no agbcc dependency,
 #                 not byte-identical, no `compare` target.
 #
@@ -78,6 +81,11 @@ file(GLOB ASM_SRCS ${CMAKE_SOURCE_DIR}/asm/*.s)
 file(GLOB DATA_ASM_SRCS ${CMAKE_SOURCE_DIR}/data/*.s)
 
 file(GLOB MID_SRCS ${CMAKE_SOURCE_DIR}/sound/songs/midi/*.mid)
+
+# --- agbcc (matching build only): builds the vendored ./agbcc submodule
+# and installs it to tools/agbcc, so the matching build no longer needs
+# INSTALL.md's manual `./build.sh && ./install.sh ..` step first ---
+include(cmake/Agbcc.cmake)
 
 # --- Asset generation (graphics/audio/map/json), then the ROM itself ---
 include(cmake/Assets.cmake)

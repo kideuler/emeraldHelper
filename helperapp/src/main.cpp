@@ -1,7 +1,7 @@
 #include "emerald/mainwindow.h"
 #include "emerald/memorybridge.h"
 #include "emerald/nametable.h"
-#include "emerald/structlayout.h"
+#include "emerald/decoder.h"
 #include "emerald/symboltable.h"
 
 extern "C" {
@@ -85,10 +85,9 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    const emerald::StructLayout monLayout = emerald::StructLayout::loadFromFile(
-        dir + QStringLiteral("/battle_pokemon_layout_us_rev0.json"), QStringLiteral("BattlePokemon"),
-        &error);
-    if (!monLayout.isValid()) {
+    const emerald::BattleLayouts layouts =
+        emerald::BattleLayouts::loadFromFile(dir + QStringLiteral("/battle_pokemon_layout_us_rev0.json"), &error);
+    if (!layouts.isValid()) {
         QMessageBox::critical(nullptr, QObject::tr("Emerald Battle Companion"),
                                QObject::tr("Failed to load struct layout:\n%1").arg(error));
         return 1;
@@ -105,6 +104,17 @@ int main(int argc, char *argv[])
                                    .arg(missing.join(QStringLiteral(", "))));
         return 1;
     }
+    // The rest of BattleState: without these the app still runs, but the
+    // decoder reports them missing every frame and the UI says so.
+    static const QStringList kBattleState = {
+        "gBattlersCount", "gBattlerPositions", "gBattleWeather", "gSideStatuses", "gSideTimers",
+        "gStatuses3", "gDisableStructs", "gProtectStructs", "gEnigmaBerries", "gBattleEnvironment",
+        "gBattleResources", "gSaveBlock1Ptr", "gTrainerBattleOpponent_A",
+    };
+    const QStringList missingState = symbols.missing(kBattleState);
+    if (!missingState.isEmpty())
+        qWarning("main: symbol table has no %s -- regenerate it with tools/gen_symbols.py",
+                 qUtf8Printable(missingState.join(QStringLiteral(", "))));
 
     loadItemHoldEffects(dir + QStringLiteral("/item_hold_effects_us_rev0.json"));
 
@@ -116,7 +126,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    emerald::MainWindow window(symbols, monLayout, names);
+    emerald::MainWindow window(symbols, layouts, names);
     emerald::MemoryBridge bridge(8888);
 
     QObject::connect(&bridge, &emerald::MemoryBridge::rawSnapshot, &window,

@@ -35,6 +35,7 @@ enum Row {
     RowTypes,
     RowAbility,
     RowStatus,
+    RowStages,
     RowAttack,
     RowDefense,
     RowSpAttack,
@@ -45,23 +46,32 @@ enum Row {
 
 const char *const kRowLabels[RowCount] = {
     "Name", "HP", "Move 1", "Move 2", "Move 3", "Move 4", "Level", "Type",
-    "Ability", "Status", "Attack", "Defense", "Sp. Atk", "Sp. Def", "Speed",
+    "Ability", "Status", "Stages", "Attack", "Defense", "Sp. Atk", "Sp. Def", "Speed",
 };
 
 QString FormatMoveCell(const MoveDisplay &m)
 {
     if (!m.present)
         return QString();
-    if (!m.hasDamageRange)
-        return m.name; // status move, or opponent unknown -- name only
-    if (m.isImmune)
-        return QStringLiteral("%1 (immune)").arg(m.name);
-    return QStringLiteral("%1: %2-%3 (%4%-%5%)")
-        .arg(m.name)
-        .arg(m.minDamage)
-        .arg(m.maxDamage)
-        .arg(m.minPercent, 0, 'f', 1)
-        .arg(m.maxPercent, 0, 'f', 1);
+
+    QString name = m.name;
+    if (!m.details.isEmpty())
+        name += QStringLiteral(" [%1]").arg(m.details.join(QStringLiteral(", ")));
+
+    if (!m.hasDamageRange) // status move, no opponent, or no effect / fails -- say why if there's a reason
+        return m.note.isEmpty() ? name : QStringLiteral("%1 (%2)").arg(name, m.note);
+
+    QString cell = QStringLiteral("%1: %2-%3 (%4%-%5%)")
+                       .arg(name)
+                       .arg(m.minDamage)
+                       .arg(m.maxDamage)
+                       .arg(m.minPercent, 0, 'f', 1)
+                       .arg(m.maxPercent, 0, 'f', 1);
+    if (m.koChance > 0.0)
+        cell += QStringLiteral(" KO %1%").arg(100.0 * m.koChance, 0, 'f', m.koChance < 0.1 ? 1 : 0);
+    if (!m.note.isEmpty())
+        cell += QStringLiteral(" (%1)").arg(m.note);
+    return cell;
 }
 
 void FillColumn(QTableWidget *table, int col, const BattlerColumn &c)
@@ -86,6 +96,7 @@ void FillColumn(QTableWidget *table, int col, const BattlerColumn &c)
     set(RowTypes, c.typeText);
     set(RowAbility, c.abilityText);
     set(RowStatus, c.statusText);
+    set(RowStages, c.stagesText);
     set(RowAttack, QString::number(c.attack));
     set(RowDefense, QString::number(c.defense));
     set(RowSpAttack, QString::number(c.spAttack));
@@ -102,18 +113,22 @@ QStringList ColumnHeaders(bool isDoubleBattle)
 
 } // namespace
 
-MainWindow::MainWindow(const SymbolTable &symbols, const StructLayout &monLayout, const NameTable &names,
+MainWindow::MainWindow(const SymbolTable &symbols, const BattleLayouts &layouts, const NameTable &names,
                         QWidget *parent)
     : QMainWindow(parent)
     , m_symbols(symbols)
-    , m_monLayout(monLayout)
+    , m_layouts(layouts)
     , m_names(names)
 {
     auto *central = new QWidget(this);
     auto *layout = new QVBoxLayout(central);
 
     m_statusLabel = new QLabel(tr("Waiting for mGBA bridge connection..."), central);
+    m_statusLabel->setWordWrap(true);
     layout->addWidget(m_statusLabel);
+
+    m_fieldLabel = new QLabel(central);
+    layout->addWidget(m_fieldLabel);
 
     m_table = new QTableWidget(RowCount, 2, central);
     QStringList rowLabels;
@@ -126,7 +141,7 @@ MainWindow::MainWindow(const SymbolTable &symbols, const StructLayout &monLayout
 
     setCentralWidget(central);
     setWindowTitle(tr("Emerald Battle Companion"));
-    resize(900, 520);
+    resize(1200, 600);
 
     setStale(true);
 }
@@ -149,7 +164,7 @@ void MainWindow::onRawSnapshot(const RawSnapshot &raw)
         return; // Phase 4.4: identical frame, nothing to redo.
     m_lastHash = hash;
 
-    const BattleSnapshot snap = decodeSnapshot(raw, m_symbols, m_monLayout);
+    const BattleSnapshot snap = decodeSnapshot(raw, m_symbols, m_layouts);
     if (!snap.valid) {
         setStale(true);
         return;
@@ -159,9 +174,17 @@ void MainWindow::onRawSnapshot(const RawSnapshot &raw)
 
 void MainWindow::applySnapshot(const BattleSnapshot &snap)
 {
-    m_statusLabel->setText(snap.inBattle() ? tr("In battle") : tr("Connected, not in battle"));
+    QString status = snap.inBattle() ? tr("In battle") : tr("Connected, not in battle");
+    // Don't let numbers computed without (say) the weather pass as exact:
+    // name what the bridge isn't sending, which usually means mGBA is still
+    // running an older lua/emerald_bridge.lua.
+    if (!snap.missingRegions.isEmpty())
+        status += tr(" -- bridge isn't sending %1; damage ignores them (reload lua/emerald_bridge.lua?)")
+                      .arg(snap.missingRegions.join(QStringLiteral(", ")));
+    m_statusLabel->setText(status);
 
     const BattlerGrid grid = BuildBattlerGrid(snap, m_names);
+    m_fieldLabel->setText(grid.fieldText.isEmpty() ? QString() : tr("Field: %1").arg(grid.fieldText));
 
     if (m_table->columnCount() != grid.columns.size()) {
         m_table->setColumnCount(grid.columns.size());

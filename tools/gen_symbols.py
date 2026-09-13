@@ -14,13 +14,27 @@ WANTED = {
     "gBattlerPartyIndexes", "gAbsentBattlerFlags", "gBattleStruct",
     "gPlayerParty", "gEnemyParty", "gTrainerBattleOpponent_A",
     "gRngValue", "gBattleMoves", "gSpeciesInfo", "gTrainers",
+    # Everything else the calc's BattleState mirrors (helperapp/calc/include/
+    # battle_state.h) -- the per-battler/per-side globals CalculateBaseDamage()
+    # and the battle script commands read besides gBattleMons.
+    "gBattlersCount", "gBattlerPositions", "gBattleWeather", "gSideStatuses",
+    "gSideTimers", "gStatuses3", "gDisableStructs", "gProtectStructs",
+    "gEnigmaBerries", "gBattleEnvironment",
+    # Pointers, chased by the Lua bridge: gBattleResources->flags (Flash
+    # Fire), gSaveBlock1Ptr->flags (badges, for ShouldGetStatBadgeBoost()).
+    "gBattleResources", "gSaveBlock1Ptr",
 }
 
 # Matches an exact symbol-definition line, e.g.:
 #                 0x02001438                gBattleMons
+# ...or, for a COMMON symbol resolved via a generated linker-script
+# assignment (matching/agbcc build only -- see build/*/sym_common.ld,
+# produced by ramscrgen for byte-exact placement; the modern build
+# doesn't use this mechanism, so its map never has the "= ." suffix):
+#                 0x03005d80                        gRngValue = .
 # Anchored on both ends so it can't match a substring reference elsewhere
 # in the map file (object file paths, cross-reference notes, etc).
-LINE_RE = re.compile(r"^\s+0x([0-9a-fA-F]+)\s+(\w+)$")
+LINE_RE = re.compile(r"^\s+0x([0-9a-fA-F]+)\s+(\w+)(?:\s*=\s*\.)?$")
 
 
 def extract(map_path):

@@ -1,9 +1,9 @@
 #pragma once
 
 #include "emerald/battlesnapshot.h"
+#include "emerald/decoder.h"
 #include "emerald/nametable.h"
 #include "emerald/rawsnapshot.h"
-#include "emerald/structlayout.h"
 #include "emerald/symboltable.h"
 
 #include <QByteArray>
@@ -22,7 +22,7 @@ class MainWindow : public QMainWindow
 {
     Q_OBJECT
 public:
-    MainWindow(const SymbolTable &symbols, const StructLayout &monLayout, const NameTable &names,
+    MainWindow(const SymbolTable &symbols, const BattleLayouts &layouts, const NameTable &names,
                QWidget *parent = nullptr);
 
 public slots:
@@ -34,10 +34,11 @@ private:
     void setStale(bool stale);
 
     SymbolTable m_symbols;
-    StructLayout m_monLayout;
+    BattleLayouts m_layouts;
     NameTable m_names;
 
     QLabel *m_statusLabel;
+    QLabel *m_fieldLabel;
     QTableWidget *m_table;
 
     QByteArray m_lastHash;

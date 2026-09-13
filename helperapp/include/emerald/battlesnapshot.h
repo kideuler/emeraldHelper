@@ -1,76 +1,45 @@
 #pragma once
 
 #include <QMetaType>
+#include <QStringList>
 #include <QtGlobal>
+
+extern "C" {
+#include "battle_state.h"
+}
 
 // Phase 4.2 decode target. Value types only -- no sockets, no globals, no
 // Qt widgets -- so decode() (decoder.h) is a pure function these tests can
 // hammer offline, per Phase 2's testability requirement.
 namespace emerald {
 
-constexpr int kMaxBattlers = 4;
-constexpr int kMaxMonMoves = 4;
-constexpr int kNumBattleStats = 8;
-constexpr int kPartySize = 6;
-
-struct BattleMon {
-    quint16 species = 0;
-    quint16 attack = 0;
-    quint16 defense = 0;
-    quint16 speed = 0;
-    quint16 spAttack = 0;
-    quint16 spDefense = 0;
-    quint16 hp = 0;
-    quint16 maxHp = 0;
-    quint16 moves[kMaxMonMoves] = {};
-    quint8 pp[kMaxMonMoves] = {};
-    qint8 statStages[kNumBattleStats] = {};
-    quint8 type1 = 0;
-    quint8 type2 = 0;
-    quint8 ability = 0;
-    quint8 level = 0;
-    quint32 status1 = 0;
-    quint16 item = 0;
-};
-
-// A benched party member. Phase 2.2: party data is encrypted, so `valid`
-// reflects whether the substruct checksum matched -- decode it before
-// trusting anything else in here (a torn read mid-write in the emulator,
-// or simply an empty slot, both fail the checksum).
-struct PartyMon {
-    bool valid = false;
-    bool isEgg = false;
-    quint16 species = 0;
-    quint8 level = 0;
-    quint16 hp = 0;
-    quint16 maxHp = 0;
-    quint16 attack = 0;
-    quint16 defense = 0;
-    quint16 speed = 0;
-    quint16 spAttack = 0;
-    quint16 spDefense = 0;
-    quint16 moves[kMaxMonMoves] = {};
-    quint8 pp[kMaxMonMoves] = {};
-    quint32 status = 0;
-};
+constexpr int kMaxBattlers = MAX_BATTLERS_COUNT;
+constexpr int kMaxMonMoves = MAX_MON_MOVES;
+constexpr int kNumBattleStats = NUM_BATTLE_STATS;
+constexpr int kPartySize = PARTY_SIZE;
 
 struct BattleSnapshot {
+    BattleSnapshot() { BattleState_Init(&state); }
+
     // False until a first fully-decoded frame has been applied. Phase 4's
     // "stale UI" gotcha: the UI should treat this the same as a dropped
     // bridge connection, not render zeroed placeholder data.
     bool valid = false;
 
-    quint32 typeFlags = 0;
-    quint8 battlerAttacker = 0;
-    quint8 battlerTarget = 0;
-    quint8 absentBattlerFlags = 0;
-    quint16 battlerPartyIndexes[kMaxBattlers] = {};
+    // The game's battle globals, mirrored one for one (calc/include/
+    // battle_state.h) -- exactly what the calculator runs against.
+    BattleState state;
 
-    BattleMon mons[kMaxBattlers];
-    PartyMon playerParty[kPartySize];
-    PartyMon enemyParty[kPartySize];
+    // Regions the calc reads that this frame didn't carry -- an older
+    // lua/emerald_bridge.lua, or a pointer (gBattleResources,
+    // gSaveBlock1Ptr) that couldn't be followed. Their part of `state` is
+    // left at its BattleState_Init() default, so anything they feed into
+    // (weather, screens, badge boosts, ...) is missing from the numbers;
+    // the UI surfaces this list rather than presenting those numbers as
+    // exact.
+    QStringList missingRegions;
 
-    bool inBattle() const { return valid && typeFlags != 0; }
+    bool inBattle() const { return valid && state.battleTypeFlags != 0; }
 };
 
 } // namespace emerald
